@@ -41,6 +41,7 @@ bool tiengchuongreo = false;
 unsigned long TimeDocDS3231 = 0;
 unsigned long TimeDocDHT = 0;
 unsigned long TimeCheckFirebase = 0;
+unsigned long TimeCheckDatNgay = 0;
 unsigned long TimeCheckDatGio = 0;
 
 int8_t phutcuoicung = -1;
@@ -48,6 +49,7 @@ int8_t NhietDo = 0;
 uint8_t DoAm = 0;
 uint8_t Gio = 0;
 uint8_t Phut = 0;
+uint8_t Giay = 0;
 
 typedef struct __attribute__((packed))
 {
@@ -65,6 +67,7 @@ void BaoThuc(DateTime now);
 void DongHo(DateTime now);
 void CamBienDHT();
 void XuLyDocBaoThucFirebase();
+void XuLyDatNgayFirebase();
 void XuLyDatGioFirebase();
 void MatrixPanel();
 void KichHoatCauHinhFirebase();
@@ -149,6 +152,7 @@ void loop()
   DongHo(now);
   CamBienDHT();
   XuLyDocBaoThucFirebase();
+  XuLyDatNgayFirebase();
   XuLyDatGioFirebase();
 }
 
@@ -235,6 +239,7 @@ void DongHo(DateTime now)
   }
   Gio = now.hour();
   Phut = now.minute();
+  Giay = now.second();
 }
 
 void BaoThuc(DateTime now)
@@ -366,7 +371,51 @@ void XuLyDocBaoThucFirebase()
   }
 }
 
-// Lắng nghe lệnh chỉnh giờ từ App (qua Firebase) và ghi vào DS3231
+void XuLyDatNgayFirebase()
+{
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatNgay > 2000 || TimeCheckDatNgay == 0))
+  {
+    TimeCheckDatNgay = millis();
+
+    if (Firebase.RTDB.getJSON(&Data, F("/DongHo/DatNgay")))
+    {
+      if (Data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
+      {
+        FirebaseJson &json = Data.jsonObject();
+        FirebaseJsonData resultCapNhat, resultNgay, resultThang, resultNam;
+
+        json.get(resultCapNhat, "/capNhat");
+
+        // Chỉ xử lý khi App đặt cờ capNhat = true
+        if (resultCapNhat.success && resultCapNhat.boolValue == true)
+        {
+          json.get(resultNgay, "/Ngay");
+          json.get(resultThang, "/Thang");
+          json.get(resultNam, "/Nam");
+
+          // Giữ nguyên giờ:phút:giây hiện tại của RTC, chỉ thay ngày/tháng/năm
+          DateTime hienTai = rtc.now();
+
+          uint8_t ngayMoi = resultNgay.success ? resultNgay.intValue : hienTai.day();
+          uint8_t thangMoi = resultThang.success ? resultThang.intValue : hienTai.month();
+          uint16_t namMoi = resultNam.success ? resultNam.intValue : hienTai.year();
+
+          DateTime ngayMoiSet(namMoi, thangMoi, ngayMoi,
+                              hienTai.hour(), hienTai.minute(), hienTai.second());
+
+          rtc.adjust(ngayMoiSet);
+
+          Serial.printf("\n[Firebase] Da nhan lenh chinh ngay -> RTC: %02d/%02d/%04d\n",
+                        ngayMoi, thangMoi, namMoi);
+
+          // Reset cờ capNhat về false, tránh chỉnh lại liên tục
+          Firebase.RTDB.setBool(&Data, F("/DongHo/DatNgay/capNhat"), false);
+        }
+      }
+    }
+  }
+}
+
 void XuLyDatGioFirebase()
 {
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatGio > 2000 || TimeCheckDatGio == 0))
@@ -394,7 +443,6 @@ void XuLyDatGioFirebase()
           uint8_t phutMoi = resultPhut.success ? resultPhut.intValue : 0;
           uint8_t giayMoi = resultGiay.success ? resultGiay.intValue : 0;
 
-          // Giữ nguyên ngày/tháng/năm hiện tại của RTC, chỉ thay giờ:phút:giây
           DateTime hienTai = rtc.now();
           DateTime gioMoiSet(hienTai.year(), hienTai.month(), hienTai.day(), gioMoi, phutMoi, giayMoi);
 
@@ -402,7 +450,6 @@ void XuLyDatGioFirebase()
 
           Serial.printf("\n[Firebase] Da nhan lenh chinh gio -> RTC: %02d:%02d:%02d\n", gioMoi, phutMoi, giayMoi);
 
-          // Reset co capNhat ve false de bao da xu ly xong, tranh chinh lai lien tuc
           Firebase.RTDB.setBool(&Data, F("/DongHo/DatGio/capNhat"), false);
         }
       }
@@ -427,8 +474,16 @@ void MatrixPanel()
   static int8_t phutTruocDo = -1;
   static int8_t nhietDoTruocDo = -1;
   static int8_t doAmTruocDo = -1;
+  static unsigned long thoiGianToggle = 0;
+  static bool dauHaiChamHien = true;
 
-  if (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo)
+  bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
+  bool canToggle = (millis() - thoiGianToggle >= 500);
+
+  if (!phutThayDoi && !canToggle)
+    return;
+
+  if (phutThayDoi)
   {
     phutTruocDo = Phut;
     nhietDoTruocDo = NhietDo;
@@ -438,24 +493,28 @@ void MatrixPanel()
 
     char TextGio[3];
     char TextPhut[3];
-
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
 
     dmd.drawString(1, 0, TextGio, 3, GRAPHICS_NORMAL);
-    dmd.drawString(14, 0, ":", 1, GRAPHICS_NORMAL);
-    dmd.drawString(20, 0, TextPhut, 3, GRAPHICS_NORMAL);
-
-    // String textNhietDo = String(NhietDo);
-    // String textDoAm = String(DoAm);
+    dmd.drawString(19, 0, TextPhut, 3, GRAPHICS_NORMAL);
 
     char textNhietDo[3];
     char textDoAm[3];
-
     sprintf(textNhietDo, "%02d", NhietDo);
     sprintf(textDoAm, "%02d", DoAm);
 
     printIn3x5(dmd, 1, 11, textNhietDo, 2);
     printIn3x5(dmd, 18, 11, textDoAm, 1);
+  }
+
+  if (canToggle)
+  {
+    thoiGianToggle = millis();
+    dauHaiChamHien = !dauHaiChamHien;
+    if (dauHaiChamHien)
+      dmd.drawChar(14, 0, ':', GRAPHICS_NORMAL);
+    else
+      dmd.drawFilledBox(14, 0, 18, 7, GRAPHICS_INVERSE);
   }
 }

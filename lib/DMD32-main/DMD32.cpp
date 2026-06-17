@@ -152,7 +152,7 @@ void DMD::drawString(int bX, int bY, const char *bChars, byte length,
 	    if (charWide > 0) {
 	        strWidth += charWide ;
 	        this->drawLine(bX + strWidth , bY, bX + strWidth , bY + height, GRAPHICS_INVERSE);
-            strWidth++;
+            strWidth+=2;
         } else if (charWide < 0) {
             return;
         }
