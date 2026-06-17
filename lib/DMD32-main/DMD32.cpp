@@ -58,14 +58,17 @@ DMD::DMD(byte panelsWide, byte panelsHigh)
     digitalWrite(PIN_DMD_CLK, LOW);	// 
     digitalWrite(PIN_DMD_SCLK, LOW);	// 
     digitalWrite(PIN_DMD_R_DATA, HIGH);	// 
-    digitalWrite(PIN_DMD_nOE, LOW);	//
+    // Khởi tạo PWM cho chân OE để điều chỉnh độ sáng
+    ledcSetup(DMD_LEDC_CHANNEL, DMD_LEDC_FREQ, DMD_LEDC_RES);
+    ledcAttachPin(PIN_DMD_nOE, DMD_LEDC_CHANNEL);
+    ledcWrite(DMD_LEDC_CHANNEL, 0); // Tắt OE khi khởi động
 
     pinMode(PIN_DMD_A, OUTPUT);	//
     pinMode(PIN_DMD_B, OUTPUT);	//
     pinMode(PIN_DMD_CLK, OUTPUT);	//
     pinMode(PIN_DMD_SCLK, OUTPUT);	//
     pinMode(PIN_DMD_R_DATA, OUTPUT);	//
-    pinMode(PIN_DMD_nOE, OUTPUT);	//
+    // PIN_DMD_nOE đã được cấu hình bởi ledcAttachPin ở trên
     
 
 
@@ -465,7 +468,8 @@ void DMD::scanDisplayBySPI()
             bDMDByte=0;
             break;
         }
-        OE_DMD_ROWS_ON();
+        // Bật OE với độ sáng hiện tại (PWM)
+        ledcWrite(DMD_LEDC_CHANNEL, _brightness);
     }
 }
 
@@ -561,7 +565,9 @@ int DMD::charWidth(const unsigned char letter)
     return width;
 }
 
-
-
-
-
+void DMD::setBrightness(uint8_t brightness)
+{
+    _brightness = brightness;
+    // Nếu đang trong trạng thái ON, cập nhật ngay lập tức
+    ledcWrite(DMD_LEDC_CHANNEL, _brightness);
+}

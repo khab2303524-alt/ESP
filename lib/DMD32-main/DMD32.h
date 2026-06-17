@@ -48,6 +48,7 @@ LED Panel Layout in RAM
 
 // ESP32 pins used for the display connection (Using VSPI)
 #define PIN_DMD_nOE 14
+#define PIN_DMD_A 12
 #define PIN_DMD_B 13
 #define PIN_DMD_CLK 18
 #define PIN_DMD_SCLK 4
@@ -84,14 +85,17 @@ LED Panel Layout in RAM
     digitalWrite(PIN_DMD_SCLK, HIGH);   \
     digitalWrite(PIN_DMD_SCLK, LOW);    \
   }
+#define DMD_LEDC_CHANNEL 0
+#define DMD_LEDC_FREQ 5000
+#define DMD_LEDC_RES 8 // 8-bit: 0–255
+
 #define OE_DMD_ROWS_OFF()           \
   {                                 \
-    digitalWrite(PIN_DMD_nOE, LOW); \
+    ledcWrite(DMD_LEDC_CHANNEL, 0); \
   }
-#define OE_DMD_ROWS_ON()             \
-  {                                  \
-    digitalWrite(PIN_DMD_nOE, HIGH); \
-  }
+
+// OE_DMD_ROWS_ON() dùng giá trị _brightness lưu trong instance
+// — macro này không được dùng trực tiếp nữa, thay bằng ledcWrite trong scanDisplayBySPI
 
 // Pixel/graphics writing modes (bGraphicsMode)
 #define GRAPHICS_NORMAL 0
@@ -187,6 +191,9 @@ public:
   // Insert the calls to this function into the main loop for the highest call rate, or from a timer interrupt
   void scanDisplayBySPI();
 
+  // Set display brightness (0 = tắt, 255 = sáng tối đa)
+  void setBrightness(uint8_t brightness);
+
 private:
   void drawCircleSub(int cx, int cy, int x, int y, byte bGraphicsMode);
 
@@ -216,6 +223,9 @@ private:
   // uninitalised pointer to SPI object
   SPIClass *vspi = NULL;
   static const int spiClk = 4000000; // 4 MHz SPI clock
+
+  // Độ sáng màn hình (0–255), mặc định 200
+  uint8_t _brightness = 200;
 };
 
 #endif /* DMD_H_ */

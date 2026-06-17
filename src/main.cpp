@@ -43,6 +43,7 @@ unsigned long TimeDocDHT = 0;
 unsigned long TimeCheckFirebase = 0;
 unsigned long TimeCheckDatNgay = 0;
 unsigned long TimeCheckDatGio = 0;
+unsigned long TimeCheckDoSang = 0;
 
 int8_t phutcuoicung = -1;
 int8_t NhietDo = 0;
@@ -69,6 +70,7 @@ void CamBienDHT();
 void XuLyDocBaoThucFirebase();
 void XuLyDatNgayFirebase();
 void XuLyDatGioFirebase();
+void XuLyDoSangFirebase();
 void MatrixPanel();
 void KichHoatCauHinhFirebase();
 void DocBaoThucTuFlash();
@@ -154,6 +156,7 @@ void loop()
   XuLyDocBaoThucFirebase();
   XuLyDatNgayFirebase();
   XuLyDatGioFirebase();
+  XuLyDoSangFirebase();
 }
 
 void IRAM_ATTR triggerScan()
@@ -453,6 +456,24 @@ void XuLyDatGioFirebase()
           Firebase.RTDB.setBool(&Data, F("/DongHo/DatGio/capNhat"), false);
         }
       }
+    }
+  }
+}
+
+void XuLyDoSangFirebase()
+{
+  // Đọc độ sáng từ Firebase mỗi 5 giây
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > 5000 || TimeCheckDoSang == 0))
+  {
+    TimeCheckDoSang = millis();
+
+    if (Firebase.RTDB.getInt(&Data, F("/DongHo/DoSang")))
+    {
+      int doSang = Data.intData();
+      // Giới hạn 0–255
+      doSang = constrain(doSang, 0, 255);
+      dmd.setBrightness((uint8_t)doSang);
+      Serial.printf("[DoSang] Cap nhat do sang LED: %d\n", doSang);
     }
   }
 }
