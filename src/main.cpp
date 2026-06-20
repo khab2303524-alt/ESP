@@ -413,14 +413,12 @@ void XuLyDatNgayFirebase()
 
         json.get(resultCapNhat, "/capNhat");
 
-        // Chỉ xử lý khi App đặt cờ capNhat = true
         if (resultCapNhat.success && resultCapNhat.boolValue == true)
         {
           json.get(resultNgay, "/Ngay");
           json.get(resultThang, "/Thang");
           json.get(resultNam, "/Nam");
 
-          // Giữ nguyên giờ:phút:giây hiện tại của RTC, chỉ thay ngày/tháng/năm
           DateTime hienTai = rtc.now();
 
           uint8_t ngayMoi = resultNgay.success ? resultNgay.intValue : hienTai.day();
@@ -435,7 +433,6 @@ void XuLyDatNgayFirebase()
           Serial.printf("\n[Firebase] Da nhan lenh chinh ngay -> RTC: %02d/%02d/%04d\n",
                         ngayMoi, thangMoi, namMoi);
 
-          // Reset cờ capNhat về false, tránh chỉnh lại liên tục
           Firebase.RTDB.setBool(&Data, F("/DongHo/DatNgay/capNhat"), false);
         }
       }
@@ -459,7 +456,6 @@ void XuLyDatGioFirebase()
 
         json.get(resultCapNhat, "/capNhat");
 
-        // Chỉ xử lý khi App đặt cờ capNhat = true (đang có yêu cầu chỉnh giờ mới)
         if (resultCapNhat.success && resultCapNhat.boolValue == true)
         {
           json.get(resultGio, "/Gio");
