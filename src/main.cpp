@@ -127,7 +127,8 @@ void setup()
   delay(200);
   pinMode(BELL, OUTPUT);
 
-  SPI.begin(18, -1, 23, -1);
+  pinMode(SS, INPUT_PULLUP);
+
   delay(200);
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
@@ -483,7 +484,7 @@ void TaskKhoiTaoNgatCore0(void *ThamSo)
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
-  timerAlarmWrite(timer, 1000, true);
+  timerAlarmWrite(timer, 200, true);
   timerAlarmEnable(timer);
 
   Serial.println("\n[He thong] Ngat cung da duoc ghim vao CORE 0!");
