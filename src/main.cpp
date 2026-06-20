@@ -10,8 +10,8 @@
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
 
-#define SSID "Kha"
-#define PASSWORD "27122005"
+#define SSID_DEFAULT "Kha"
+#define PASSWORD_DEFAULT "27122005"
 #define API_KEY "AIzaSyCgXZegFdu02rhzI90DD1a1by0CidEaG5g"
 #define DATABASE_URL "https://dong-ho-dien-tu-daktdt-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define FIREBASE_AUTH "eAx4Js7aVrc2hSwqDcmbwhLdoucxe02370UUDGjM"
@@ -62,6 +62,10 @@ typedef struct __attribute__((packed))
 baothuc dsbaothuc[MAX_BAO_THUC];
 bool firebaseDaKhoiTao = false;
 
+// WiFi credentials đọc từ flash
+String wifiSSID = SSID_DEFAULT;
+String wifiPassword = PASSWORD_DEFAULT;
+
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
 void BaoThuc(DateTime now);
@@ -76,25 +80,75 @@ void KichHoatCauHinhFirebase();
 void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
 void TaskKhoiTaoNgatCore0(void *ThamSo);
+void DocWifiTuFlash();
+void XuLyWifiFirebase();
+
+void DocWifiTuFlash()
+{
+  preferences.begin("WiFiCfg", true);
+  String ssid = preferences.getString("ssid", SSID_DEFAULT);
+  String pass = preferences.getString("pass", PASSWORD_DEFAULT);
+  preferences.end();
+  if (ssid.length() > 0) {
+    wifiSSID = ssid;
+    wifiPassword = pass;
+    Serial.printf("[Flash] Da doc WiFi: %s\n", ssid.c_str());
+  }
+}
+
+// Kiểm tra Firebase mỗi 10 giây xem App có cập nhật WiFi mới không
+unsigned long TimeCheckWifi = 0;
+void XuLyWifiFirebase()
+{
+  if (!firebaseDaKhoiTao || !Firebase.ready()) return;
+  if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0) return;
+  TimeCheckWifi = millis();
+
+  FirebaseData wData;
+  if (Firebase.RTDB.getJSON(&wData, F("/WiFi")))
+  {
+    if (wData.dataTypeEnum() == fb_esp_rtdb_data_type_json)
+    {
+      FirebaseJson &json = wData.jsonObject();
+      FirebaseJsonData rSsid, rPass;
+      json.get(rSsid, "/ssid");
+      json.get(rPass, "/password");
+
+      if (rSsid.success && rSsid.stringValue.length() > 0)
+      {
+        String newSsid = rSsid.stringValue;
+        String newPass = rPass.success ? rPass.stringValue : "";
+
+        // Nếu khác với flash hiện tại -> lưu và restart
+        if (newSsid != wifiSSID || newPass != wifiPassword)
+        {
+          Serial.printf("[WiFi] Phat hien WiFi moi: %s -> Luu va khoi dong lai!\n", newSsid.c_str());
+          preferences.begin("WiFiCfg", false);
+          preferences.putString("ssid", newSsid);
+          preferences.putString("pass", newPass);
+          preferences.end();
+          delay(500);
+          ESP.restart();
+        }
+      }
+    }
+  }
+}
 
 void VeDauPhanTram(int ox, int oy)
 {
-
   const uint8_t pattern[7] = {
-      0x61,
-      0x62,
-      0x04,
-      0x08,
-      0x10,
-      0x23,
-      0x43,
+    0x61,  // 1100001
+    0x62,  // 1100010
+    0x04,  // 0000100
+    0x08,  // 0001000
+    0x10,  // 0010000
+    0x23,  // 0100011
+    0x43,  // 1000011
   };
-  for (int row = 0; row < 7; row++)
-  {
-    for (int col = 0; col < 7; col++)
-    {
-      if (pattern[row] & (0x40 >> col))
-      {
+  for (int row = 0; row < 7; row++) {
+    for (int col = 0; col < 7; col++) {
+      if (pattern[row] & (0x40 >> col)) {
         dmd.writePixel(ox + col, oy + row, GRAPHICS_NORMAL, 1);
       }
     }
@@ -120,7 +174,9 @@ void setup()
   Serial.println("\nChuan bi ket noi WiFi");
   delay(500);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(SSID, PASSWORD);
+  DocWifiTuFlash();
+  Serial.printf("[WiFi] SSID: %s\n", wifiSSID.c_str());
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
 
   WiFi.setAutoReconnect(false);
   Serial.print("Dang Ket Noi Wifi ");
@@ -181,6 +237,7 @@ void loop()
   XuLyDatNgayFirebase();
   XuLyDatGioFirebase();
   XuLyDoSangFirebase();
+  XuLyWifiFirebase();
 }
 
 void IRAM_ATTR triggerScan()
@@ -341,7 +398,6 @@ void XuLyDocBaoThucFirebase()
     {
       if (Data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
       {
-
         FirebaseJson &json = Data.jsonObject();
         FirebaseJsonData resultBaoThuc, resultGio, resultPhut, resultActive;
         String pathBaoThuc, pathGio, pathPhut, pathActive;
@@ -450,7 +506,6 @@ void XuLyDatGioFirebase()
     {
       if (Data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
       {
-
         FirebaseJson &json = Data.jsonObject();
         FirebaseJsonData resultCapNhat, resultGio, resultPhut, resultGiay;
 
@@ -482,7 +537,6 @@ void XuLyDatGioFirebase()
 
 void XuLyDoSangFirebase()
 {
-  // Đọc độ sáng từ Firebase mỗi 5 giây
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > 5000 || TimeCheckDoSang == 0))
   {
     TimeCheckDoSang = millis();
@@ -490,7 +544,6 @@ void XuLyDoSangFirebase()
     if (Firebase.RTDB.getInt(&Data, F("/DongHo/DoSang")))
     {
       int doSang = Data.intData();
-      // Giới hạn 0–255
       doSang = constrain(doSang, 0, 255);
       dmd.setBrightness((uint8_t)doSang);
       Serial.printf("[DoSang] Cap nhat do sang LED: %d\n", doSang);
@@ -522,7 +575,7 @@ void MatrixPanel()
 
   bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
   bool canToggle = (millis() - thoiGianToggle >= 500);
-  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 10000);
+  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 5000);
 
   if (!phutThayDoi && !canToggle && !canDoiCamBien)
     return;
@@ -555,16 +608,12 @@ void MatrixPanel()
     {
       char textSo[3];
       sprintf(textSo, "%02d", NhietDo);
-
       dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
-
       const uint8_t deg[2] = {0x60, 0x60};
-
       for (int row = 0; row < 2; row++)
         for (int col = 0; col < 2; col++)
           if (deg[row] & (0x40 >> col))
             dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
-
       dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
     }
     else
@@ -572,7 +621,6 @@ void MatrixPanel()
       char textSoAm[3];
       sprintf(textSoAm, "%02d", DoAm);
       dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
-
       VeDauPhanTram(20, 9);
     }
   }
