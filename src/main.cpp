@@ -77,23 +77,24 @@ void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
 void TaskKhoiTaoNgatCore0(void *ThamSo);
 
-// Vẽ dấu % tùy chỉnh tại (ox, oy) theo pattern 8x8
 void VeDauPhanTram(int ox, int oy)
 {
-  // pattern[row] = bitmask 8 bit, bit7=col0 ... bit0=col7
-  // pattern 7 cột x 8 hàng, bit6=col0 .. bit0=col6
+
   const uint8_t pattern[7] = {
-    0x61,
-    0x62,
-    0x04,
-    0x08,
-    0x10,
-    0x23,
-    0x43,
+      0x61,
+      0x62,
+      0x04,
+      0x08,
+      0x10,
+      0x23,
+      0x43,
   };
-  for (int row = 0; row < 7; row++) {
-    for (int col = 0; col < 7; col++) {
-      if (pattern[row] & (0x40 >> col)) {
+  for (int row = 0; row < 7; row++)
+  {
+    for (int col = 0; col < 7; col++)
+    {
+      if (pattern[row] & (0x40 >> col))
+      {
         dmd.writePixel(ox + col, oy + row, GRAPHICS_NORMAL, 1);
       }
     }
@@ -525,7 +526,7 @@ void MatrixPanel()
 
   bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
   bool canToggle = (millis() - thoiGianToggle >= 500);
-  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 5000);
+  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 10000);
 
   if (!phutThayDoi && !canToggle && !canDoiCamBien)
     return;
@@ -559,13 +560,14 @@ void MatrixPanel()
       char textSo[3];
       sprintf(textSo, "%02d", NhietDo);
 
-      dmd.drawString(4, 9, textSo, 2, GRAPHICS_NORMAL);
+      dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
 
-      const uint8_t deg[2] = {0x70, 0x50};
+      const uint8_t deg[2] = {0x60, 0x60};
 
       for (int row = 0; row < 2; row++)
         for (int col = 0; col < 2; col++)
-          if (deg[row] & (0x40 >> col)) dmd.writePixel(18 + col, 9 + row, GRAPHICS_NORMAL, 1);
+          if (deg[row] & (0x40 >> col))
+            dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
 
       dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
     }
@@ -573,9 +575,9 @@ void MatrixPanel()
     {
       char textSoAm[3];
       sprintf(textSoAm, "%02d", DoAm);
-      dmd.drawString(4, 9, textSoAm, 2, GRAPHICS_NORMAL);
+      dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
 
-      VeDauPhanTram(18, 9);
+      VeDauPhanTram(20, 9);
     }
   }
 
