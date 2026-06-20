@@ -77,6 +77,30 @@ void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
 void TaskKhoiTaoNgatCore0(void *ThamSo);
 
+void VeDauPhanTram(int ox, int oy)
+{
+
+  const uint8_t pattern[7] = {
+      0x61,
+      0x62,
+      0x04,
+      0x08,
+      0x10,
+      0x23,
+      0x43,
+  };
+  for (int row = 0; row < 7; row++)
+  {
+    for (int col = 0; col < 7; col++)
+    {
+      if (pattern[row] & (0x40 >> col))
+      {
+        dmd.writePixel(ox + col, oy + row, GRAPHICS_NORMAL, 1);
+      }
+    }
+  }
+}
+
 void setup()
 {
   Serial.begin(9600);
@@ -497,12 +521,22 @@ void MatrixPanel()
   static int8_t doAmTruocDo = -1;
   static unsigned long thoiGianToggle = 0;
   static bool dauHaiChamHien = true;
+  static unsigned long thoiGianDoiCamBien = 0;
+  static bool hienNhietDo = true;
 
   bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
   bool canToggle = (millis() - thoiGianToggle >= 500);
+  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 10000);
 
-  if (!phutThayDoi && !canToggle)
+  if (!phutThayDoi && !canToggle && !canDoiCamBien)
     return;
+
+  if (canDoiCamBien)
+  {
+    thoiGianDoiCamBien = millis();
+    hienNhietDo = !hienNhietDo;
+    phutThayDoi = true;
+  }
 
   if (phutThayDoi)
   {
@@ -511,28 +545,47 @@ void MatrixPanel()
     doAmTruocDo = DoAm;
 
     dmd.clearScreen(true);
+    dmd.selectFont(System5x7);
 
     char TextGio[3];
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
 
-    dmd.drawString(1, 0, TextGio, 3, GRAPHICS_NORMAL);
-    dmd.drawString(19, 0, TextPhut, 3, GRAPHICS_NORMAL);
+    dmd.drawString(1, 0, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(19, 0, TextPhut, 2, GRAPHICS_NORMAL);
 
-    char textNhietDo[3];
-    char textDoAm[3];
-    sprintf(textNhietDo, "%02d", NhietDo);
-    sprintf(textDoAm, "%02d", DoAm);
+    if (hienNhietDo)
+    {
+      char textSo[3];
+      sprintf(textSo, "%02d", NhietDo);
 
-    printIn3x5(dmd, 1, 11, textNhietDo, 2);
-    printIn3x5(dmd, 18, 11, textDoAm, 1);
+      dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
+
+      const uint8_t deg[2] = {0x60, 0x60};
+
+      for (int row = 0; row < 2; row++)
+        for (int col = 0; col < 2; col++)
+          if (deg[row] & (0x40 >> col))
+            dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
+
+      dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
+    }
+    else
+    {
+      char textSoAm[3];
+      sprintf(textSoAm, "%02d", DoAm);
+      dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
+
+      VeDauPhanTram(20, 9);
+    }
   }
 
   if (canToggle)
   {
     thoiGianToggle = millis();
     dauHaiChamHien = !dauHaiChamHien;
+    dmd.selectFont(System5x7);
     if (dauHaiChamHien)
       dmd.drawChar(14, 0, ':', GRAPHICS_NORMAL);
     else
