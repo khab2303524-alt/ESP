@@ -86,7 +86,9 @@ void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
 void TaskKhoiTaoNgatCore0(void *ThamSo);
 void DocWifiTuFlash();
+void GhiWifiHienTaiLenFirebase();
 void XuLyWifiFirebase();
+void GhiWifiHienTaiLenFirebase();
 
 void DocWifiTuFlash()
 {
@@ -95,11 +97,14 @@ void DocWifiTuFlash()
   String pass = preferences.getString("pass", "");
   preferences.end();
 
-  if (ssid.length() > 0) {
+  if (ssid.length() > 0)
+  {
     wifiSSID = ssid;
     wifiPassword = pass;
     Serial.printf("[Flash] Da doc WiFi tu flash: %s\n", ssid.c_str());
-  } else {
+  }
+  else
+  {
     wifiSSID = SSID_DEFAULT;
     wifiPassword = PASSWORD_DEFAULT;
     Serial.printf("[Flash] Dung WiFi default: %s\n", wifiSSID.c_str());
@@ -124,12 +129,12 @@ void BatAPMode()
 
   // Sau khi người dùng nhập WiFi thành công → lưu vào flash của WiFiManager
   // rồi callback này chạy trước khi restart
-  wm.setSaveConfigCallback([]() {
-    Serial.println("[AP] Da luu WiFi moi, dang restart...");
-  });
+  wm.setSaveConfigCallback([]()
+                           { Serial.println("[AP] Da luu WiFi moi, dang restart..."); });
 
   // Tên AP hiển thị trên điện thoại
-  if (!wm.startConfigPortal("DongHo-Setup")) {
+  if (!wm.startConfigPortal("DongHo-Setup"))
+  {
     Serial.println("[AP] Timeout hoac that bai, restart...");
     ESP.restart();
   }
@@ -153,8 +158,10 @@ void XuLyAPMode() { /* WiFiManager tu xu ly, khong can */ }
 unsigned long TimeCheckWifi = 0;
 void XuLyWifiFirebase()
 {
-  if (!firebaseDaKhoiTao || !Firebase.ready()) return;
-  if (millis() - TimeCheckWifi < 30000 && TimeCheckWifi != 0) return;
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+  if (millis() - TimeCheckWifi < 30000 && TimeCheckWifi != 0)
+    return;
   TimeCheckWifi = millis();
 
   FirebaseData wData;
@@ -162,7 +169,8 @@ void XuLyWifiFirebase()
   if (Firebase.RTDB.getBool(&wData, F("/WiFi/capNhat")))
     capNhat = wData.boolData();
 
-  if (!capNhat) return;
+  if (!capNhat)
+    return;
 
   String newSsid = "", newPass = "";
   if (Firebase.RTDB.getString(&wData, F("/WiFi/ssid")))
@@ -170,7 +178,8 @@ void XuLyWifiFirebase()
   if (Firebase.RTDB.getString(&wData, F("/WiFi/password")))
     newPass = wData.stringData();
 
-  if (newSsid.length() == 0) return;
+  if (newSsid.length() == 0)
+    return;
 
   Serial.printf("[WiFi] Nhan lenh doi WiFi: %s\n", newSsid.c_str());
 
@@ -198,17 +207,20 @@ void XuLyWifiFirebase()
 void VeDauPhanTram(int ox, int oy)
 {
   const uint8_t pattern[7] = {
-    0x61,  // 1100001
-    0x62,  // 1100010
-    0x04,  // 0000100
-    0x08,  // 0001000
-    0x10,  // 0010000
-    0x23,  // 0100011
-    0x43,  // 1000011
+      0x61, // 1100001
+      0x62, // 1100010
+      0x04, // 0000100
+      0x08, // 0001000
+      0x10, // 0010000
+      0x23, // 0100011
+      0x43, // 1000011
   };
-  for (int row = 0; row < 7; row++) {
-    for (int col = 0; col < 7; col++) {
-      if (pattern[row] & (0x40 >> col)) {
+  for (int row = 0; row < 7; row++)
+  {
+    for (int col = 0; col < 7; col++)
+    {
+      if (pattern[row] & (0x40 >> col))
+      {
         dmd.writePixel(ox + col, oy + row, GRAPHICS_NORMAL, 1);
       }
     }
@@ -320,6 +332,19 @@ void KichHoatCauHinhFirebase()
   }
 }
 
+void GhiWifiHienTaiLenFirebase()
+{
+  // Ghi SSID thực tế ESP32 đang kết nối lên Firebase
+  // App đọc từ đây để hiển thị đúng, kể cả khi cấu hình qua AP
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+  String ssidHienTai = WiFi.SSID();
+  if (ssidHienTai.length() == 0)
+    return;
+  Firebase.RTDB.setString(&Data, F("/WiFi/ssidHienTai"), ssidHienTai);
+  Serial.printf("[Firebase] Da ghi WiFi hien tai: %s\n", ssidHienTai.c_str());
+}
+
 void DocBaoThucTuFlash()
 {
   preferences.begin("BaoThucNS", true);
@@ -369,6 +394,14 @@ void DongHo(DateTime now)
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeDocDS3231 >= 1000 || TimeDocDS3231 == 0))
   {
     TimeDocDS3231 = millis();
+
+    // Ghi SSID thực tế 1 lần duy nhất sau khi Firebase sẵn sàng
+    static bool daGhiWifi = false;
+    if (!daGhiWifi)
+    {
+      GhiWifiHienTaiLenFirebase();
+      daGhiWifi = true;
+    }
 
     FirebaseJson json;
     json.set("GioGiac/Gio", now.hour());
@@ -668,22 +701,21 @@ void MatrixPanel()
     {
       char textSo[3];
       sprintf(textSo, "%02d", NhietDo);
-      dmd.drawString(4, 9, textSo, 2, GRAPHICS_NORMAL);
-      // Dấu ° 2x2
+      dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
       const uint8_t deg[2] = {0x60, 0x60};
       for (int row = 0; row < 2; row++)
         for (int col = 0; col < 2; col++)
           if (deg[row] & (0x40 >> col))
-            dmd.writePixel(18 + col, 9 + row, GRAPHICS_NORMAL, 1);
+            dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
       dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
-    }
+    } //x = 5, x = 19, x = 22
     else
     {
       char textSoAm[3];
       sprintf(textSoAm, "%02d", DoAm);
-      dmd.drawString(4, 9, textSoAm, 2, GRAPHICS_NORMAL);
-      VeDauPhanTram(18, 9);
-    }
+      dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
+      VeDauPhanTram(20, 9);
+    } //x = 5, x = 20
   }
 
   if (canToggle)
