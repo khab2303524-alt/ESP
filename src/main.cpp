@@ -7,9 +7,11 @@
 #include <SPI.h>
 #include <DMD32.h>
 #include <Preferences.h>
+#include <WiFiManager.h>
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
 
+// WiFi mặc định (fallback nếu chưa cấu hình qua app)
 #define SSID_DEFAULT "Kha"
 #define PASSWORD_DEFAULT "27122005"
 #define API_KEY "AIzaSyCgXZegFdu02rhzI90DD1a1by0CidEaG5g"
@@ -62,6 +64,9 @@ typedef struct __attribute__((packed))
 baothuc dsbaothuc[MAX_BAO_THUC];
 bool firebaseDaKhoiTao = false;
 
+// WiFiManager
+bool apModeActive = false;
+
 // WiFi credentials đọc từ flash
 String wifiSSID = SSID_DEFAULT;
 String wifiPassword = PASSWORD_DEFAULT;
@@ -86,53 +91,108 @@ void XuLyWifiFirebase();
 void DocWifiTuFlash()
 {
   preferences.begin("WiFiCfg", true);
-  String ssid = preferences.getString("ssid", SSID_DEFAULT);
-  String pass = preferences.getString("pass", PASSWORD_DEFAULT);
+  String ssid = preferences.getString("ssid", "");
+  String pass = preferences.getString("pass", "");
   preferences.end();
+
   if (ssid.length() > 0) {
     wifiSSID = ssid;
     wifiPassword = pass;
-    Serial.printf("[Flash] Da doc WiFi: %s\n", ssid.c_str());
+    Serial.printf("[Flash] Da doc WiFi tu flash: %s\n", ssid.c_str());
+  } else {
+    wifiSSID = SSID_DEFAULT;
+    wifiPassword = PASSWORD_DEFAULT;
+    Serial.printf("[Flash] Dung WiFi default: %s\n", wifiSSID.c_str());
   }
 }
 
-// Kiểm tra Firebase mỗi 10 giây xem App có cập nhật WiFi mới không
+void XoaWifiFlash()
+{
+  preferences.begin("WiFiCfg", false);
+  preferences.remove("ssid");
+  preferences.remove("pass");
+  preferences.end();
+  Serial.println("[Flash] Da xoa WiFi trong flash");
+}
+
+// ── WiFiManager AP Mode ─────────────────────────────────
+void BatAPMode()
+{
+  Serial.println("[AP] Bat AP Mode qua WiFiManager...");
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // timeout 3 phút
+
+  // Sau khi người dùng nhập WiFi thành công → lưu vào flash của WiFiManager
+  // rồi callback này chạy trước khi restart
+  wm.setSaveConfigCallback([]() {
+    Serial.println("[AP] Da luu WiFi moi, dang restart...");
+  });
+
+  // Tên AP hiển thị trên điện thoại
+  if (!wm.startConfigPortal("DongHo-Setup")) {
+    Serial.println("[AP] Timeout hoac that bai, restart...");
+    ESP.restart();
+  }
+
+  // Nếu đến đây = kết nối thành công
+  // WiFiManager tự lưu credentials vào flash riêng của nó
+  // Đồng bộ sang Preferences để XuLyWifiFirebase dùng được
+  preferences.begin("WiFiCfg", false);
+  preferences.putString("ssid", WiFi.SSID());
+  preferences.putString("pass", WiFi.psk());
+  preferences.end();
+  Serial.printf("[AP] Ket noi thanh cong: %s\n", WiFi.SSID().c_str());
+  apModeActive = false;
+  // Kích hoạt Firebase
+  KichHoatCauHinhFirebase();
+}
+
+void XuLyAPMode() { /* WiFiManager tu xu ly, khong can */ }
+
+// Kiểm tra Firebase mỗi 30 giây xem App có cập nhật WiFi mới không
 unsigned long TimeCheckWifi = 0;
 void XuLyWifiFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready()) return;
-  if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0) return;
+  if (millis() - TimeCheckWifi < 30000 && TimeCheckWifi != 0) return;
   TimeCheckWifi = millis();
 
   FirebaseData wData;
-  if (Firebase.RTDB.getJSON(&wData, F("/WiFi")))
+  bool capNhat = false;
+  if (Firebase.RTDB.getBool(&wData, F("/WiFi/capNhat")))
+    capNhat = wData.boolData();
+
+  if (!capNhat) return;
+
+  String newSsid = "", newPass = "";
+  if (Firebase.RTDB.getString(&wData, F("/WiFi/ssid")))
+    newSsid = wData.stringData();
+  if (Firebase.RTDB.getString(&wData, F("/WiFi/password")))
+    newPass = wData.stringData();
+
+  if (newSsid.length() == 0) return;
+
+  Serial.printf("[WiFi] Nhan lenh doi WiFi: %s\n", newSsid.c_str());
+
+  // Reset flag ngay
+  Firebase.RTDB.setBool(&Data, F("/WiFi/capNhat"), false);
+
+  // Nếu WiFi mới = WiFi đang dùng → không cần làm gì
+  if (newSsid == wifiSSID && newPass == wifiPassword)
   {
-    if (wData.dataTypeEnum() == fb_esp_rtdb_data_type_json)
-    {
-      FirebaseJson &json = wData.jsonObject();
-      FirebaseJsonData rSsid, rPass;
-      json.get(rSsid, "/ssid");
-      json.get(rPass, "/password");
-
-      if (rSsid.success && rSsid.stringValue.length() > 0)
-      {
-        String newSsid = rSsid.stringValue;
-        String newPass = rPass.success ? rPass.stringValue : "";
-
-        // Nếu khác với flash hiện tại -> lưu và restart
-        if (newSsid != wifiSSID || newPass != wifiPassword)
-        {
-          Serial.printf("[WiFi] Phat hien WiFi moi: %s -> Luu va khoi dong lai!\n", newSsid.c_str());
-          preferences.begin("WiFiCfg", false);
-          preferences.putString("ssid", newSsid);
-          preferences.putString("pass", newPass);
-          preferences.end();
-          delay(500);
-          ESP.restart();
-        }
-      }
-    }
+    Serial.println("[WiFi] WiFi khong thay doi");
+    return;
   }
+
+  // Lưu vào flash rồi restart — boot lên sẽ dùng WiFi mới
+  // Nếu kết nối thất bại, lần sau app phải gửi lại lệnh
+  Serial.printf("[WiFi] Luu flash va restart voi WiFi moi: %s\n", newSsid.c_str());
+  preferences.begin("WiFiCfg", false);
+  preferences.putString("ssid", newSsid);
+  preferences.putString("pass", newPass);
+  preferences.end();
+  delay(500);
+  ESP.restart();
 }
 
 void VeDauPhanTram(int ox, int oy)
@@ -189,9 +249,8 @@ void setup()
     delay(100);
     if (millis() - thoiGianKetNoiWifi > 10000)
     {
-      Serial.println("\n[WiFi] Ket noi that bai! Chuyen sang che do OFFLINE.");
-      WiFi.disconnect(true);
-      WiFi.mode(WIFI_OFF);
+      Serial.println("\n[WiFi] Ket noi that bai! Bat AP Mode de cau hinh.");
+      BatAPMode();
       break;
     }
   }
@@ -238,6 +297,7 @@ void loop()
   XuLyDatGioFirebase();
   XuLyDoSangFirebase();
   XuLyWifiFirebase();
+  XuLyAPMode();
 }
 
 void IRAM_ATTR triggerScan()
@@ -608,20 +668,21 @@ void MatrixPanel()
     {
       char textSo[3];
       sprintf(textSo, "%02d", NhietDo);
-      dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
+      dmd.drawString(4, 9, textSo, 2, GRAPHICS_NORMAL);
+      // Dấu ° 2x2
       const uint8_t deg[2] = {0x60, 0x60};
       for (int row = 0; row < 2; row++)
         for (int col = 0; col < 2; col++)
           if (deg[row] & (0x40 >> col))
-            dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
+            dmd.writePixel(18 + col, 9 + row, GRAPHICS_NORMAL, 1);
       dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
     }
     else
     {
       char textSoAm[3];
       sprintf(textSoAm, "%02d", DoAm);
-      dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
-      VeDauPhanTram(20, 9);
+      dmd.drawString(4, 9, textSoAm, 2, GRAPHICS_NORMAL);
+      VeDauPhanTram(18, 9);
     }
   }
 
