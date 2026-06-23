@@ -431,45 +431,54 @@ void DMD::drawTestPattern(byte bPattern)
 void DMD::scanDisplayBySPI()
 {
     //if PIN_OTHER_SPI_nCS is in use during a DMD scan request then scanDisplayBySPI() will exit without conflict! (and skip that scan)
-   if( digitalRead( PIN_OTHER_SPI_nCS ) == HIGH )
-   {
-        //SPI transfer pixels to the display hardware shift registers
+    if( digitalRead( PIN_OTHER_SPI_nCS ) == HIGH )
+    {
+        // ── FIX 1: Tắt OE TRƯỚC KHI shift data — tránh dòng rò / ghost pixel ──
+        // ledcWrite(0) cập nhật PWM duty cycle nhưng không tắt pin tức thì.
+        // Dùng REG_WRITE trực tiếp xuống GPIO để đảm bảo OE = HIGH ngay lập tức.
+        ledcWrite(DMD_LEDC_CHANNEL, 0);
+        REG_WRITE(GPIO_OUT_W1TS_REG, (1UL << PIN_DMD_nOE)); // OE = HIGH (tắt display)
+        delayMicroseconds(2); // đợi LED tắt hoàn toàn
+
+        // ── FIX 2: beginTransaction 1 lần ngoài vòng lặp — shift liên tục, không overhead ──
         int rowsize=DisplaysTotal<<2;
         int offset=rowsize * bDMDByte;
+        vspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
         for (int i=0;i<rowsize;i++) {
-        
-		vspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-		vspi->transfer(bDMDScreenRAM[offset+i+row3]);
-		vspi->transfer(bDMDScreenRAM[offset+i+row2]);
-		vspi->transfer(bDMDScreenRAM[offset+i+row1]);
-		vspi->transfer(bDMDScreenRAM[offset+i]);
-		vspi->endTransaction();
+            vspi->transfer(bDMDScreenRAM[offset+i+row3]);
+            vspi->transfer(bDMDScreenRAM[offset+i+row2]);
+            vspi->transfer(bDMDScreenRAM[offset+i+row1]);
+            vspi->transfer(bDMDScreenRAM[offset+i]);
+        }
+        vspi->endTransaction();
 
-       }
-        
-
-        OE_DMD_ROWS_OFF();
+        // Chốt data và đổi địa chỉ hàng — OE vẫn đang tắt
         LATCH_DMD_SHIFT_REG_TO_OUTPUT();
         switch (bDMDByte) {
-        case 0:			// row 1, 5, 9, 13 were clocked out
+        case 0:         // row 1, 5, 9, 13 were clocked out
             LIGHT_DMD_ROW_01_05_09_13();
             bDMDByte=1;
             break;
-        case 1:			// row 2, 6, 10, 14 were clocked out
+        case 1:         // row 2, 6, 10, 14 were clocked out
             LIGHT_DMD_ROW_02_06_10_14();
             bDMDByte=2;
             break;
-        case 2:			// row 3, 7, 11, 15 were clocked out
+        case 2:         // row 3, 7, 11, 15 were clocked out
             LIGHT_DMD_ROW_03_07_11_15();
             bDMDByte=3;
             break;
-        case 3:			// row 4, 8, 12, 16 were clocked out
+        case 3:         // row 4, 8, 12, 16 were clocked out
             LIGHT_DMD_ROW_04_08_12_16();
             bDMDByte=0;
             break;
         }
-        // Bật OE với độ sáng hiện tại (PWM)
-        ledcWrite(DMD_LEDC_CHANNEL, _brightness);
+
+        // ── FIX 3: Đợi A/B ổn định trước khi bật lại OE ──
+        delayMicroseconds(1);
+
+        // Bật OE với độ sáng hiện tại (PWM) — bước CUỐI CÙNG
+        REG_WRITE(GPIO_OUT_W1TC_REG, (1UL << PIN_DMD_nOE)); // kéo OE = LOW trước
+        ledcWrite(DMD_LEDC_CHANNEL, _brightness);            // bàn giao lại cho LEDC PWM
     }
 }
 

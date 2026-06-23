@@ -71,6 +71,16 @@ bool apModeActive = false;
 String wifiSSID = SSID_DEFAULT;
 String wifiPassword = PASSWORD_DEFAULT;
 
+// Flag yêu cầu đổi WiFi — được set từ loop(), xử lý trong Task riêng
+volatile bool yeuCauDoiWifi = false;
+String pendingSsid = "";
+String pendingPass = "";
+
+// Handle Task scan LED — dùng để suspend/resume khi đổi WiFi
+TaskHandle_t hTaskScanLED = NULL;
+// Notification flag từ ISR → Task
+volatile bool canScan = false;
+
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
 void BaoThuc(DateTime now);
@@ -89,6 +99,7 @@ void DocWifiTuFlash();
 void GhiWifiHienTaiLenFirebase();
 void XuLyWifiFirebase();
 void GhiWifiHienTaiLenFirebase();
+void TaskDoiWifi(void *param);
 
 void DocWifiTuFlash()
 {
@@ -156,11 +167,91 @@ void XuLyAPMode() { /* WiFiManager tu xu ly, khong can */ }
 
 // Kiểm tra Firebase mỗi 30 giây xem App có cập nhật WiFi mới không
 unsigned long TimeCheckWifi = 0;
+
+// Task đổi WiFi an toàn — suspend TaskScanLED thay vì detach interrupt
+// Đây là fix đúng: ISR chỉ notify Task, không gọi SPI trực tiếp nữa
+// nên suspend Task là đủ để dừng scan, ISR vẫn fire nhưng không có ai nhận → harmless
+void TaskDoiWifi(void *param)
+{
+  String newSsid = pendingSsid;
+  String newPass = pendingPass;
+
+  Serial.printf("[WiFi-Task] Bat dau thu ket noi: ssid='%s'\n", newSsid.c_str());
+
+  // Suspend scan task — ISR vẫn fire nhưng vTaskNotifyGiveFromISR không block
+  if (hTaskScanLED != NULL)
+    vTaskSuspend(hTaskScanLED);
+
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(true);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  WiFi.begin(newSsid.c_str(), newPass.c_str());
+
+  // Resume ngay sau begin() — LED tiếp tục scan trong khi chờ kết nối
+  if (hTaskScanLED != NULL)
+    vTaskResume(hTaskScanLED);
+
+  Serial.print("[WiFi-Task] Dang ket noi ");
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.print(".");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    if (millis() - t > 15000)
+      break;
+  }
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.printf("\n[WiFi-Task] Thanh cong: %s\n", newSsid.c_str());
+
+    Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "thanhCong");
+    Firebase.RTDB.setString(&Data, F("/WiFi/ssidHienTai"), newSsid);
+
+    preferences.begin("WiFiCfg", false);
+    preferences.putString("ssid", newSsid);
+    preferences.putString("pass", newPass);
+    preferences.end();
+
+    vTaskDelay(pdMS_TO_TICKS(4000)); // đợi Firebase propagate "thanhCong" về app
+    ESP.restart();
+  }
+  else
+  {
+    Serial.printf("\n[WiFi-Task] That bai, ket noi lai WiFi cu: %s\n", wifiSSID.c_str());
+
+    // Suspend lại trước khi đổi WiFi lần 2
+    if (hTaskScanLED != NULL)
+      vTaskSuspend(hTaskScanLED);
+
+    WiFi.disconnect(true);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+    if (hTaskScanLED != NULL)
+      vTaskResume(hTaskScanLED);
+
+    unsigned long t2 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t2 < 10000)
+      vTaskDelay(pdMS_TO_TICKS(300));
+
+    Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "thatBai");
+    WiFi.setAutoReconnect(true);
+    TimeCheckWifi = millis();
+  }
+
+  yeuCauDoiWifi = false;
+  vTaskDelete(NULL);
+}
+
 void XuLyWifiFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return;
-  if (millis() - TimeCheckWifi < 30000 && TimeCheckWifi != 0)
+  // Đang xử lý rồi thì bỏ qua
+  if (yeuCauDoiWifi)
+    return;
+  if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0)
     return;
   TimeCheckWifi = millis();
 
@@ -181,27 +272,26 @@ void XuLyWifiFirebase()
   if (newSsid.length() == 0)
     return;
 
-  Serial.printf("[WiFi] Nhan lenh doi WiFi: %s\n", newSsid.c_str());
+  Serial.printf("[WiFi] Nhan lenh doi WiFi: ssid='%s'\n", newSsid.c_str());
 
-  // Reset flag ngay
+  // Reset capNhat ngay để tránh xử lý lại sau khi restart
   Firebase.RTDB.setBool(&Data, F("/WiFi/capNhat"), false);
+  Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "dangKetNoi");
 
-  // Nếu WiFi mới = WiFi đang dùng → không cần làm gì
-  if (newSsid == wifiSSID && newPass == wifiPassword)
-  {
-    Serial.println("[WiFi] WiFi khong thay doi");
-    return;
-  }
+  // Lưu thông tin vào biến global, spawn Task riêng để tránh crash ISR
+  pendingSsid = newSsid;
+  pendingPass = newPass;
+  yeuCauDoiWifi = true;
 
-  // Lưu vào flash rồi restart — boot lên sẽ dùng WiFi mới
-  // Nếu kết nối thất bại, lần sau app phải gửi lại lệnh
-  Serial.printf("[WiFi] Luu flash va restart voi WiFi moi: %s\n", newSsid.c_str());
-  preferences.begin("WiFiCfg", false);
-  preferences.putString("ssid", newSsid);
-  preferences.putString("pass", newPass);
-  preferences.end();
-  delay(500);
-  ESP.restart();
+  xTaskCreatePinnedToCore(
+    TaskDoiWifi,
+    "TaskDoiWifi",
+    8192,       // stack lớn hơn vì có WiFi + Firebase calls
+    NULL,
+    1,
+    NULL,
+    1           // chạy trên Core 1 cùng loop(), tránh đụng timer Core 0
+  );
 }
 
 void VeDauPhanTram(int ox, int oy)
@@ -312,9 +402,24 @@ void loop()
   XuLyAPMode();
 }
 
+// ISR chỉ notify Task — KHÔNG gọi SPI/semaphore từ ISR context
 void IRAM_ATTR triggerScan()
 {
-  dmd.scanDisplayBySPI();
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  if (hTaskScanLED != NULL)
+    vTaskNotifyGiveFromISR(hTaskScanLED, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+// Task chạy trên Core 0, chờ notify từ ISR rồi mới gọi SPI scan
+void TaskScanLED(void *param)
+{
+  for (;;)
+  {
+    // Chờ notify từ ISR (block vô hạn, không burn CPU)
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    dmd.scanDisplayBySPI();
+  }
 }
 
 void KichHoatCauHinhFirebase()
@@ -646,6 +751,18 @@ void XuLyDoSangFirebase()
 
 void TaskKhoiTaoNgatCore0(void *ThamSo)
 {
+  // Tạo Task scan LED trên Core 0 TRƯỚC khi enable timer
+  // Task này nhận notify từ ISR, thực hiện SPI scan — hoàn toàn an toàn với scheduler
+  xTaskCreatePinnedToCore(
+    TaskScanLED,
+    "TaskScanLED",
+    4096,
+    NULL,
+    configMAX_PRIORITIES - 1, // priority cao nhất để scan kịp thời
+    &hTaskScanLED,
+    0 // Core 0
+  );
+
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
