@@ -213,7 +213,7 @@ void TaskDoiWifi(void *param)
     preferences.putString("pass", newPass);
     preferences.end();
 
-    vTaskDelay(pdMS_TO_TICKS(4000)); // đợi Firebase propagate "thanhCong" về app
+    vTaskDelay(pdMS_TO_TICKS(5000)); // đợi Firebase propagate "thanhCong" về app
     ESP.restart();
   }
   else
