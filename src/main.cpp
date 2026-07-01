@@ -37,6 +37,11 @@ RTC_DS3231 rtc;
 DHT dht(DHTPIN, DHTTYPE);
 Preferences preferences;
 
+// RTC có sẵn sàng hay không — không bao giờ chặn chương trình chính chờ RTC nữa,
+// chỉ đánh dấu cờ này và tự động thử kết nối lại định kỳ trong loop()
+volatile bool rtcOk = false;
+unsigned long TimeThuLaiRTC = 0;
+
 const char daysOfTheWeek[7][9] = {"Chu Nhat", "Thu 2", "Thu 3", "Thu 4", "Thu 5", "Thu 6", "Thu 7"};
 unsigned long TimeChuongReo = 0;
 bool tiengchuongreo = false;
@@ -76,10 +81,39 @@ volatile bool yeuCauDoiWifi = false;
 String pendingSsid = "";
 String pendingPass = "";
 
+// Flag đang quét WiFi lân cận — dùng để loop() tạm dừng gọi Firebase qua "Data" chung
+volatile bool dangQuetWifi = false;
+unsigned long TimeCheckQuetWifi = 0;
+
 // Handle Task scan LED — dùng để suspend/resume khi đổi WiFi
 TaskHandle_t hTaskScanLED = NULL;
 // Notification flag từ ISR → Task
 volatile bool canScan = false;
+
+// ── FIX: Mutex bảo vệ Serial ─────────────────────────────
+// Nhiều Task (loop() trên Core1, TaskDoiWifi, TaskQuetWifi, TaskKhoiTaoNgatCore0...)
+// gọi Serial.print/printf gần như đồng thời từ các Task/Core khác nhau.
+// UART không tự đồng bộ hoá, nên các byte in ra bị chèn lẫn (log lởm chởm dạng ♦♦♦♦).
+// Dùng mutex để đảm bảo mỗi lần chỉ 1 Task được ghi Serial.
+SemaphoreHandle_t serialMutex = NULL;
+
+void SafePrint(const String &s)
+{
+  if (serialMutex != NULL)
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+  Serial.print(s);
+  if (serialMutex != NULL)
+    xSemaphoreGive(serialMutex);
+}
+
+void SafePrintln(const String &s)
+{
+  if (serialMutex != NULL)
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+  Serial.println(s);
+  if (serialMutex != NULL)
+    xSemaphoreGive(serialMutex);
+}
 
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
@@ -100,6 +134,14 @@ void GhiWifiHienTaiLenFirebase();
 void XuLyWifiFirebase();
 void GhiWifiHienTaiLenFirebase();
 void TaskDoiWifi(void *param);
+void XuLyQuetWifiFirebase();
+void TaskQuetWifi(void *param);
+String JsonEscape(const String &s);
+String SanitizeSsid(const String &s);
+void KhoiTaoManHinhLED();
+void KiemTraLaiRTC();
+void TaskKetNoiWifiBanDau(void *param);
+void BatAPMode();
 
 void DocWifiTuFlash()
 {
@@ -144,7 +186,7 @@ void BatAPMode()
                            { Serial.println("[AP] Da luu WiFi moi, dang restart..."); });
 
   // Tên AP hiển thị trên điện thoại
-  if (!wm.startConfigPortal("DongHo-Setup"))
+  if (!wm.startConfigPortal("ESP32-Clock 192.168.4.1"))
   {
     Serial.println("[AP] Timeout hoac that bai, restart...");
     ESP.restart();
@@ -171,6 +213,18 @@ unsigned long TimeCheckWifi = 0;
 // Task đổi WiFi an toàn — suspend TaskScanLED thay vì detach interrupt
 // Đây là fix đúng: ISR chỉ notify Task, không gọi SPI trực tiếp nữa
 // nên suspend Task là đủ để dừng scan, ISR vẫn fire nhưng không có ai nhận → harmless
+//
+// FIX QUAN TRỌNG:
+//  1) Dùng FirebaseData RIÊNG (wifiTaskData) cho Task này thay vì dùng chung
+//     biến "Data" toàn cục với loop(). Trước đây "Data" bị loop() (DongHo(),
+//     CamBienDHT(), XuLyDocBaoThucFirebase()...) và Task này cùng lúc ghi/đọc
+//     trên Core 1 → race condition khiến setString("trangThai","thanhCong")
+//     bị hỏng dữ liệu, timeout hoặc bị đè trước khi gửi xong => Firebase
+//     không bao giờ thấy giá trị "thanhCong".
+//  2) Chờ Firebase.ready() thực sự sẵn sàng sau khi đổi WiFi (SSL phải bắt
+//     tay lại) trước khi gọi setString, tránh gọi quá sớm bị fail âm thầm.
+//  3) Kiểm tra giá trị trả về + log errorReason() để biết chính xác lý do
+//     nếu vẫn thất bại (thay vì im lặng bỏ qua như code cũ).
 void TaskDoiWifi(void *param)
 {
   String newSsid = pendingSsid;
@@ -205,8 +259,45 @@ void TaskDoiWifi(void *param)
   {
     Serial.printf("\n[WiFi-Task] Thanh cong: %s\n", newSsid.c_str());
 
-    Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "thanhCong");
-    Firebase.RTDB.setString(&Data, F("/WiFi/ssidHienTai"), newSsid);
+    // Dùng FirebaseData RIÊNG cho task này — KHÔNG đụng chung biến "Data"
+    // với loop(), tránh race condition giữa 2 luồng cùng chạy trên Core 1
+    FirebaseData wifiTaskData;
+    // FIX: tăng buffer để tránh lỗi "Invalid data; couldn't parse JSON..."
+    // khi payload lớn hơn buffer mặc định (áp dụng đồng bộ với TaskQuetWifi)
+    wifiTaskData.setBSSLBufferSize(4096, 1024);
+
+    // Đợi Firebase sẵn sàng thực sự (SSL handshake lại sau khi đổi WiFi)
+    unsigned long tReady = millis();
+    while (!Firebase.ready() && millis() - tReady < 8000)
+    {
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    if (!Firebase.ready())
+    {
+      Serial.println("[Firebase] Firebase KHONG san sang sau khi doi WiFi, van thu ghi...");
+    }
+
+    bool okTrangThai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thanhCong");
+    if (!okTrangThai)
+    {
+      Serial.printf("[Firebase] LOI ghi /WiFi/trangThai: %s\n", wifiTaskData.errorReason().c_str());
+      // Thử lại 1 lần sau 500ms
+      vTaskDelay(pdMS_TO_TICKS(500));
+      okTrangThai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thanhCong");
+      if (!okTrangThai)
+        Serial.printf("[Firebase] LOI lan 2 ghi /WiFi/trangThai: %s\n", wifiTaskData.errorReason().c_str());
+      else
+        Serial.println("[Firebase] Ghi /WiFi/trangThai thanh cong o lan thu 2!");
+    }
+    else
+    {
+      Serial.println("[Firebase] Da ghi /WiFi/trangThai = thanhCong");
+    }
+
+    bool okSsid = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/ssidHienTai"), newSsid);
+    if (!okSsid)
+      Serial.printf("[Firebase] LOI ghi /WiFi/ssidHienTai: %s\n", wifiTaskData.errorReason().c_str());
 
     preferences.begin("WiFiCfg", false);
     preferences.putString("ssid", newSsid);
@@ -235,7 +326,13 @@ void TaskDoiWifi(void *param)
     while (WiFi.status() != WL_CONNECTED && millis() - t2 < 10000)
       vTaskDelay(pdMS_TO_TICKS(300));
 
-    Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "thatBai");
+    // Dùng FirebaseData riêng ở đây luôn, tránh race condition với loop()
+    FirebaseData wifiTaskData;
+    wifiTaskData.setBSSLBufferSize(4096, 1024);
+    bool okThatBai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thatBai");
+    if (!okThatBai)
+      Serial.printf("[Firebase] LOI ghi /WiFi/trangThai=thatBai: %s\n", wifiTaskData.errorReason().c_str());
+
     WiFi.setAutoReconnect(true);
     TimeCheckWifi = millis();
   }
@@ -249,7 +346,7 @@ void XuLyWifiFirebase()
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return;
   // Đang xử lý rồi thì bỏ qua
-  if (yeuCauDoiWifi)
+  if (yeuCauDoiWifi || dangQuetWifi)
     return;
   if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0)
     return;
@@ -284,13 +381,196 @@ void XuLyWifiFirebase()
   yeuCauDoiWifi = true;
 
   xTaskCreatePinnedToCore(
-    TaskDoiWifi,
-    "TaskDoiWifi",
-    8192,       // stack lớn hơn vì có WiFi + Firebase calls
-    NULL,
-    1,
-    NULL,
-    1           // chạy trên Core 1 cùng loop(), tránh đụng timer Core 0
+      TaskDoiWifi,
+      "TaskDoiWifi",
+      8192, // stack lớn hơn vì có WiFi + Firebase calls
+      NULL,
+      1,
+      NULL,
+      1 // chạy trên Core 1 cùng loop(), tránh đụng timer Core 0
+  );
+}
+
+// Escape dấu " và \ trong SSID trước khi nhét vào chuỗi JSON thủ công
+String JsonEscape(const String &s)
+{
+  String out;
+  out.reserve(s.length() + 4);
+  for (size_t i = 0; i < s.length(); i++)
+  {
+    char c = s[i];
+    if (c == '"' || c == '\\')
+      out += '\\';
+    out += c;
+  }
+  return out;
+}
+
+// Lọc bỏ byte không hợp lệ trong SSID (nhiều router phát SSID chứa byte UTF-8
+// hỏng/emoji lỗi encoding). Chỉ 1 SSID hỏng cũng làm Firebase REST API từ chối
+// TOÀN BỘ payload JSON ("Invalid data; couldn't parse JSON..."), nên phải lọc
+// sạch trước khi build chuỗi JSON. Chỉ giữ ký tự ASCII in được (0x20-0x7E),
+// bỏ hẳn các byte control/UTF-8 nhiều byte không xác định được.
+String SanitizeSsid(const String &s)
+{
+  String out;
+  out.reserve(s.length());
+  for (size_t i = 0; i < s.length(); i++)
+  {
+    uint8_t c = (uint8_t)s[i];
+    if (c >= 0x20 && c <= 0x7E)
+      out += (char)c;
+  }
+  return out;
+}
+
+// Task quét WiFi lân cận — chạy riêng để không block loop() (LED, chuông, đồng hồ)
+// Kết quả trả về đúng định dạng app đang chờ:
+//   /WiFi/danhSachWifi = JSON array THẬT [{"ssid":"...","rssi":-45},...]
+//   /WiFi/quetLuoi = false khi quét xong (app poll cờ này)
+//
+// FIX QUAN TRỌNG (thay cho hướng "tăng buffer" trước đây — buffer KHÔNG phải
+// nguyên nhân, vì payload chỉ ~483 byte vẫn lỗi):
+// Trước đây code tự nối chuỗi ký tự thành một String "trông giống JSON"
+// ("[{\"ssid\":...}]") rồi gọi Firebase.RTDB.setString() để lưu nó như MỘT
+// CHUỖI. Thư viện Firebase-ESP-Client phải tự quote + escape lại toàn bộ nội
+// dung chuỗi đó (vì bản thân nó chứa hàng loạt dấu " và {}[]) trước khi gửi
+// lên server. Việc quote/escape lại một chuỗi vốn đã là JSON dễ tính sai
+// Content-Length hoặc escape thiếu, khiến server nhận được body JSON không
+// hợp lệ -> lỗi "Invalid data; couldn't parse JSON object, array, or value."
+//
+// Cách sửa dứt điểm: dùng FirebaseJsonArray để build DANH SÁCH THẬT (không
+// phải chuỗi giả JSON), rồi ghi thẳng bằng Firebase.RTDB.setArray(). Thư viện
+// tự serialize đúng chuẩn 100%, không còn bước "chuỗi chứa JSON cần escape
+// lại" nữa nên loại bỏ hẳn lỗi này.
+void TaskQuetWifi(void *param)
+{
+  Serial.println("[WiFi-Scan] Bat dau quet mang WiFi lan can...");
+
+  // Quét đồng bộ (block trong Task này thôi, không ảnh hưởng loop()/LED)
+  int soMang = WiFi.scanNetworks(false, false);
+  if (soMang < 0)
+    soMang = 0;
+
+  const int GIOI_HAN_MANG = 20;
+  const int GIOI_HAN_SAP_XEP = 64;
+
+  FirebaseJsonArray dsMangArr; // mảng JSON THẬT, không phải chuỗi thủ công
+  int soDaThem = 0;
+  int soBiLoc = 0;
+  String daThem[GIOI_HAN_MANG];
+
+  if (soMang > 0)
+  {
+    int soPhanTu = soMang < GIOI_HAN_SAP_XEP ? soMang : GIOI_HAN_SAP_XEP;
+    int idx[GIOI_HAN_SAP_XEP];
+    for (int i = 0; i < soPhanTu; i++)
+      idx[i] = i;
+
+    // Sắp xếp giảm dần theo RSSI (mạng mạnh nhất lên đầu danh sách)
+    for (int i = 0; i < soPhanTu - 1; i++)
+      for (int j = i + 1; j < soPhanTu; j++)
+        if (WiFi.RSSI(idx[j]) > WiFi.RSSI(idx[i]))
+        {
+          int tmp = idx[i];
+          idx[i] = idx[j];
+          idx[j] = tmp;
+        }
+
+    for (int k = 0; k < soPhanTu && soDaThem < GIOI_HAN_MANG; k++)
+    {
+      int i = idx[k];
+      String ssidGoc = WiFi.SSID(i);
+      String ssid = SanitizeSsid(ssidGoc);
+
+      if (ssid.length() == 0)
+      {
+        // SSID rỗng (mạng ẩn) hoặc toàn byte hỏng sau khi lọc -> bỏ qua
+        if (ssidGoc.length() > 0)
+          soBiLoc++;
+        continue;
+      }
+
+      // Bỏ trùng SSID (nhiều access point cùng phát 1 tên) — chỉ giữ tín hiệu mạnh nhất
+      bool daTrung = false;
+      for (int m = 0; m < soDaThem; m++)
+      {
+        if (daThem[m] == ssid)
+        {
+          daTrung = true;
+          break;
+        }
+      }
+      if (daTrung)
+        continue;
+
+      daThem[soDaThem++] = ssid;
+
+      // Thêm 1 object {"ssid":..,"rssi":..} thật vào mảng — thư viện tự lo
+      // việc escape/quote đúng chuẩn, không cần JsonEscape thủ công nữa
+      FirebaseJson objMang;
+      objMang.set("ssid", ssid);
+      objMang.set("rssi", WiFi.RSSI(i));
+      dsMangArr.add(objMang);
+    }
+  }
+
+  Serial.printf("[WiFi-Scan] Tim thay %d mang, gui %d mang (da loc trung, bo %d mang SSID hong) len Firebase\n",
+                soMang, soDaThem, soBiLoc);
+
+  WiFi.scanDelete(); // giải phóng bộ nhớ kết quả scan
+
+  // Dùng FirebaseData RIÊNG cho Task này — không đụng "Data" dùng chung với loop()
+  FirebaseData scanData;
+  scanData.setBSSLBufferSize(4096, 1024); // vẫn giữ buffer lớn cho an toàn
+
+  bool okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
+  if (!okList)
+    Serial.printf("[Firebase] LOI ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
+  else
+    Serial.println("[Firebase] Da ghi /WiFi/danhSachWifi thanh cong!");
+
+  bool okFlag = Firebase.RTDB.setBool(&scanData, F("/WiFi/quetLuoi"), false);
+  if (!okFlag)
+    Serial.printf("[Firebase] LOI ghi /WiFi/quetLuoi=false: %s\n", scanData.errorReason().c_str());
+
+  Serial.println("[WiFi-Scan] Hoan tat, da gui danh sach len Firebase.");
+
+  dangQuetWifi = false;
+  vTaskDelete(NULL);
+}
+
+// Kiểm tra Firebase xem app có yêu cầu quét WiFi lân cận không (cờ /WiFi/quetLuoi = true)
+void XuLyQuetWifiFirebase()
+{
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+  // Đang đổi WiFi hoặc đang quét dở thì bỏ qua, tránh chồng chéo
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+  if (millis() - TimeCheckQuetWifi < 2000 && TimeCheckQuetWifi != 0)
+    return;
+  TimeCheckQuetWifi = millis();
+
+  FirebaseData qData;
+  bool capNhat = false;
+  if (Firebase.RTDB.getBool(&qData, F("/WiFi/quetLuoi")))
+    capNhat = qData.boolData();
+
+  if (!capNhat)
+    return;
+
+  Serial.println("[WiFi] Nhan lenh quet mang WiFi lan can tu app");
+  dangQuetWifi = true;
+
+  xTaskCreatePinnedToCore(
+      TaskQuetWifi,
+      "TaskQuetWifi",
+      8192,
+      NULL,
+      1,
+      NULL,
+      1 // Core 1, cùng chỗ với TaskDoiWifi, tránh đụng timer Core 0
   );
 }
 
@@ -317,59 +597,12 @@ void VeDauPhanTram(int ox, int oy)
   }
 }
 
-void setup()
+// Khởi tạo màn hình LED matrix + timer quét — gọi ĐẦU TIÊN trong setup(),
+// không phụ thuộc RTC hay WiFi, để LED luôn sáng dù các phần khác lỗi/chậm
+void KhoiTaoManHinhLED()
 {
-  Serial.begin(9600);
-  delay(200);
-
-  if (!rtc.begin())
-  {
-    delay(200);
-    Serial.println("\nKhong The Ket Noi Voi RTC");
-    Serial.flush();
-    while (1)
-      delay(10);
-  }
-
-  DocBaoThucTuFlash();
-
-  Serial.println("\nChuan bi ket noi WiFi");
-  delay(500);
-  WiFi.mode(WIFI_STA);
-  DocWifiTuFlash();
-  Serial.printf("[WiFi] SSID: %s\n", wifiSSID.c_str());
-  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-
-  WiFi.setAutoReconnect(false);
-  Serial.print("Dang Ket Noi Wifi ");
-
-  unsigned long thoiGianKetNoiWifi = millis();
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.print(".");
-    delay(100);
-    if (millis() - thoiGianKetNoiWifi > 10000)
-    {
-      Serial.println("\n[WiFi] Ket noi that bai! Bat AP Mode de cau hinh.");
-      BatAPMode();
-      break;
-    }
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.print("\nDa Ket Noi WiFi Thanh Cong\n");
-    WiFi.setAutoReconnect(true);
-    KichHoatCauHinhFirebase();
-  }
-
-  dht.begin();
-  delay(200);
-  pinMode(BELL, OUTPUT);
-
   SPI.begin(18, -1, 23, -1);
-  delay(200);
+  delay(50);
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
 
@@ -381,13 +614,104 @@ void setup()
       configMAX_PRIORITIES,
       NULL,
       0);
+}
 
+// Thử kết nối lại RTC mỗi 10 giây nếu lần đầu thất bại — không chặn, chạy nền trong loop()
+void KiemTraLaiRTC()
+{
+  if (rtcOk)
+    return;
+  if (millis() - TimeThuLaiRTC < 10000 && TimeThuLaiRTC != 0)
+    return;
+  TimeThuLaiRTC = millis();
+
+  if (rtc.begin())
+  {
+    rtcOk = true;
+    Serial.println("[RTC] Da ket noi lai DS3231 thanh cong!");
+  }
+}
+
+// Task kết nối WiFi ban đầu chạy nền (không chặn setup()/loop()).
+// Nếu kết nối thất bại thì mở AP Mode để cấu hình — WiFiManager cũng chạy
+// trong Task riêng này, KHÔNG còn chặn LED/chuông/đồng hồ như trước nữa.
+void TaskKetNoiWifiBanDau(void *param)
+{
+  WiFi.mode(WIFI_STA);
+  DocWifiTuFlash();
+  Serial.printf("[WiFi] SSID: %s\n", wifiSSID.c_str());
+  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+  WiFi.setAutoReconnect(false);
+
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 10000)
+  {
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("\n[WiFi] Da ket noi WiFi thanh cong!");
+    WiFi.setAutoReconnect(true);
+    KichHoatCauHinhFirebase();
+  }
+  else
+  {
+    Serial.println("\n[WiFi] Ket noi that bai! Bat AP Mode de cau hinh (chay nen, khong chan he thong).");
+    BatAPMode(); // wm.startConfigPortal() chặn — nhưng chỉ chặn Task nay thôi
+  }
+
+  vTaskDelete(NULL);
+}
+
+void setup()
+{
+  Serial.begin(9600);
   delay(200);
+
+  // Khởi tạo mutex bảo vệ Serial TRƯỚC khi tạo bất kỳ Task nào khác,
+  // để tránh log bị chèn lẫn giữa nhiều Task/Core in cùng lúc
+  serialMutex = xSemaphoreCreateMutex();
+
+  // BƯỚC 1: Khởi tạo LED matrix TRƯỚC TIÊN, tuyệt đối không phụ thuộc RTC/WiFi.
+  // Nhờ vậy dù RTC lỗi hay WiFi/AP Mode mất nhiều thời gian, LED vẫn sáng bình thường.
+  KhoiTaoManHinhLED();
+
+  DocBaoThucTuFlash();
+
+  // BƯỚC 2: Thử đọc RTC — KHÔNG halt chương trình nếu lỗi nữa.
+  // Nếu lỗi, hệ thống vẫn chạy tiếp bình thường và tự thử lại RTC mỗi 10s trong loop().
+  if (!rtc.begin())
+  {
+    Serial.println("\n[RTC] Khong tim thay DS3231! He thong van tiep tuc chay, se tu dong thu lai.");
+    rtcOk = false;
+  }
+  else
+  {
+    rtcOk = true;
+  }
+
+  dht.begin();
+  pinMode(BELL, OUTPUT);
+
+  // BƯỚC 3: Kết nối WiFi (và AP Mode nếu cần) chạy hoàn toàn trong Task nền,
+  // setup() trả về ngay lập tức, loop() chạy bình thường dù WiFi chưa xong.
+  xTaskCreatePinnedToCore(
+      TaskKetNoiWifiBanDau,
+      "WifiInitTask",
+      12288, // stack lớn vì có WiFiManager (web server + DNS server)
+      NULL,
+      1,
+      NULL,
+      1 // Core 1, không đụng Core 0 (LED/timer)
+  );
 }
 
 void loop()
 {
-  DateTime now = rtc.now();
+  KiemTraLaiRTC();
+
+  DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
 
   BaoThuc(now);
   KiemTraTatChuong();
@@ -399,6 +723,7 @@ void loop()
   XuLyDatGioFirebase();
   XuLyDoSangFirebase();
   XuLyWifiFirebase();
+  XuLyQuetWifiFirebase();
   XuLyAPMode();
 }
 
@@ -496,6 +821,20 @@ void LuuBaoThucVaoFlash()
 
 void DongHo(DateTime now)
 {
+  // RTC chưa sẵn sàng -> không cập nhật giờ hiển thị/Firebase, chờ KiemTraLaiRTC() tự phục hồi
+  if (!rtcOk)
+    return;
+
+  // Đang đổi WiFi thì không đụng vào Firebase qua "Data" dùng chung,
+  // tránh tranh chấp SSL với TaskDoiWifi làm chậm/lỗi việc ghi trangThai
+  if (yeuCauDoiWifi || dangQuetWifi)
+  {
+    Gio = now.hour();
+    Phut = now.minute();
+    Giay = now.second();
+    return;
+  }
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeDocDS3231 >= 1000 || TimeDocDS3231 == 0))
   {
     TimeDocDS3231 = millis();
@@ -526,6 +865,10 @@ void DongHo(DateTime now)
 
 void BaoThuc(DateTime now)
 {
+  // RTC chưa sẵn sàng -> không kiểm tra báo thức, tránh trigger nhầm ở giờ giả 00:00
+  if (!rtcOk)
+    return;
+
   if (tiengchuongreo || now.minute() == phutcuoicung)
   {
     if (now.minute() != phutcuoicung && phutcuoicung != -1)
@@ -575,7 +918,8 @@ void CamBienDHT()
     float humi = dht.readHumidity();
     if (!isnan(temp) && !isnan(humi))
     {
-      if (firebaseDaKhoiTao && Firebase.ready())
+      // Đang đổi WiFi thì bỏ qua ghi Firebase qua "Data" dùng chung
+      if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
       {
         Firebase.RTDB.setFloat(&Data, F("/CamBien/NhietDo"), temp);
         Firebase.RTDB.setFloat(&Data, F("/CamBien/DoAm"), humi);
@@ -588,6 +932,9 @@ void CamBienDHT()
 
 void XuLyDocBaoThucFirebase()
 {
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckFirebase > 7000 || TimeCheckFirebase == 0))
   {
     TimeCheckFirebase = millis();
@@ -641,11 +988,10 @@ void XuLyDocBaoThucFirebase()
           }
         }
 
-        Serial.println("[Firebase] Da cap nhat danh sach bao thuc vao RAM!");
-
         if (coThayDoi)
         {
           LuuBaoThucVaoFlash();
+          Serial.println("[Firebase] Da cap nhat danh sach bao thuc vao RAM!");
         }
       }
     }
@@ -654,6 +1000,12 @@ void XuLyDocBaoThucFirebase()
 
 void XuLyDatNgayFirebase()
 {
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+
+  if (!rtcOk)
+    return; // Chưa có RTC thì không có gì để chỉnh giờ/ngày lên
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatNgay > 2000 || TimeCheckDatNgay == 0))
   {
     TimeCheckDatNgay = millis();
@@ -696,6 +1048,12 @@ void XuLyDatNgayFirebase()
 
 void XuLyDatGioFirebase()
 {
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+
+  if (!rtcOk)
+    return; // Chưa có RTC thì không có gì để chỉnh giờ lên
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatGio > 2000 || TimeCheckDatGio == 0))
   {
     TimeCheckDatGio = millis();
@@ -735,6 +1093,9 @@ void XuLyDatGioFirebase()
 
 void XuLyDoSangFirebase()
 {
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > 5000 || TimeCheckDoSang == 0))
   {
     TimeCheckDoSang = millis();
@@ -743,8 +1104,14 @@ void XuLyDoSangFirebase()
     {
       int doSang = Data.intData();
       doSang = constrain(doSang, 0, 255);
-      dmd.setBrightness((uint8_t)doSang);
-      Serial.printf("[DoSang] Cap nhat do sang LED: %d\n", doSang);
+      static int doSangTruocDo = -1;
+
+      if (doSang != doSangTruocDo)
+      {
+        doSangTruocDo = doSang;
+        dmd.setBrightness((uint8_t)doSang);
+        Serial.printf("[DoSang] Cap nhat do sang LED: %d\n", doSang);
+      }
     }
   }
 }
@@ -754,13 +1121,13 @@ void TaskKhoiTaoNgatCore0(void *ThamSo)
   // Tạo Task scan LED trên Core 0 TRƯỚC khi enable timer
   // Task này nhận notify từ ISR, thực hiện SPI scan — hoàn toàn an toàn với scheduler
   xTaskCreatePinnedToCore(
-    TaskScanLED,
-    "TaskScanLED",
-    4096,
-    NULL,
-    configMAX_PRIORITIES - 1, // priority cao nhất để scan kịp thời
-    &hTaskScanLED,
-    0 // Core 0
+      TaskScanLED,
+      "TaskScanLED",
+      4096,
+      NULL,
+      configMAX_PRIORITIES - 1, // priority cao nhất để scan kịp thời
+      &hTaskScanLED,
+      0 // Core 0
   );
 
   uint8_t cpuClock = ESP.getCpuFreqMHz();
@@ -825,14 +1192,14 @@ void MatrixPanel()
           if (deg[row] & (0x40 >> col))
             dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
       dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
-    } //x = 5, x = 19, x = 22
+    } // x = 5, x = 19, x = 22
     else
     {
       char textSoAm[3];
       sprintf(textSoAm, "%02d", DoAm);
       dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
       VeDauPhanTram(20, 9);
-    } //x = 5, x = 20
+    } // x = 5, x = 20
   }
 
   if (canToggle)
