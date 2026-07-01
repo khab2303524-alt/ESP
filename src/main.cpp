@@ -130,6 +130,7 @@ void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
 bool DongBoBaoThucLenFirebase();
 uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu);
+bool LaBaoThucMotLan(uint8_t index);
 void TaskKhoiTaoNgatCore0(void *ThamSo);
 void DocWifiTuFlash();
 void GhiWifiHienTaiLenFirebase();
@@ -877,6 +878,13 @@ bool TatBaoThucMotLan(int index)
   return true;
 }
 
+bool LaBaoThucMotLan(uint8_t index)
+{
+  if (index >= MAX_BAO_THUC)
+    return false;
+  return thuMaskBaoThuc[index] == 0;
+}
+
 // Cập nhật giờ hiển thị và đồng bộ lên Firebase
 void DongHo(DateTime now)
 {
@@ -949,7 +957,7 @@ void BaoThuc(DateTime now)
       digitalWrite(BELL, HIGH);
       Serial.printf("\nBAO THUC SO %d KICH HOAT! (Reo trong %u giay, ngat quang 3s reo/2s nghi)\n", i + 1, ThoiGianReoGiay);
 
-      if (thuMaskBaoThuc[i] == 0)
+      if (LaBaoThucMotLan(i))
       {
         dsbaothuc[i].active = false;
         LuuBaoThucVaoFlash();
@@ -1035,22 +1043,21 @@ void XuLyDocBaoThucFirebase()
     if (!firebaseDaKhoiTao || !Firebase.ready())
       return;
 
-    int idxCanTat = -1;
+    bool daDongBo = false;
     for (int i = 0; i < MAX_BAO_THUC; i++)
     {
-      if (!dsbaothuc[i].active && thuMaskBaoThuc[i] == 0)
+      if (!dsbaothuc[i].active && LaBaoThucMotLan(i))
       {
-        idxCanTat = i;
-        break;
+        if (TatBaoThucMotLan(i))
+        {
+          daDongBo = true;
+        }
       }
     }
 
-    if (idxCanTat >= 0)
+    if (daDongBo)
     {
-      if (TatBaoThucMotLan(idxCanTat))
-      {
-        baoThucCanDongBoFirebase = false;
-      }
+      baoThucCanDongBoFirebase = false;
     }
 
     return;
