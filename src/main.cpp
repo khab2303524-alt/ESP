@@ -72,7 +72,9 @@ typedef struct __attribute__((packed))
 } baothuc;
 
 baothuc dsbaothuc[MAX_BAO_THUC];
+uint8_t thuMaskBaoThuc[MAX_BAO_THUC];
 bool firebaseDaKhoiTao = false;
+bool baoThucCanDongBoFirebase = false;
 
 bool apModeActive = false;
 
@@ -126,6 +128,8 @@ void MatrixPanel();
 void KichHoatCauHinhFirebase();
 void DocBaoThucTuFlash();
 void LuuBaoThucVaoFlash();
+bool DongBoBaoThucLenFirebase();
+uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu);
 void TaskKhoiTaoNgatCore0(void *ThamSo);
 void DocWifiTuFlash();
 void GhiWifiHienTaiLenFirebase();
@@ -745,6 +749,7 @@ void DocBaoThucTuFlash()
       dsbaothuc[i].gio = 0;
       dsbaothuc[i].phut = 0;
       dsbaothuc[i].active = false;
+      thuMaskBaoThuc[i] = 0xFF;
     }
     Serial.println("\n[Flash] Vung nho trong. Da khoi tao mac dinh.");
     delay(100);
@@ -753,6 +758,11 @@ void DocBaoThucTuFlash()
   {
     Serial.println("\n[Flash] Khoi phuc danh sach tu Flash thanh cong!");
     delay(100);
+  }
+
+  for (uint8_t i = 0; i < MAX_BAO_THUC; i++)
+  {
+    thuMaskBaoThuc[i] = 0xFF;
   }
 }
 
@@ -774,6 +784,97 @@ void LuuBaoThucVaoFlash()
     timerAlarmEnable(timer);
   }
   Serial.println("[Flash] Da khoa ngat ngam - Dong bo Flash an toan tuyet doi!");
+}
+
+// Đọc mảng ngày lặp từ Firebase và nén thành bitmask (0 = báo thức một lần, 0xFF = chưa có dữ liệu)
+uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu)
+{
+  FirebaseJsonData resultThu;
+  json.get(resultThu, pathThu);
+
+  if (!resultThu.success || resultThu.type != "array")
+    return 0xFF;
+
+  FirebaseJsonArray thuArr;
+  resultThu.get<FirebaseJsonArray>(thuArr);
+
+  uint8_t mask = 0;
+  FirebaseJsonData resultItem;
+  for (size_t i = 0; i < thuArr.size(); i++)
+  {
+    thuArr.get(resultItem, i);
+    if (!resultItem.success)
+      continue;
+
+    int day = resultItem.to<int>();
+    if (day >= 0 && day < 7)
+      mask |= (uint8_t)(1U << day);
+  }
+
+  return mask;
+}
+
+// Ghi toàn bộ danh sách báo thức hiện tại từ RAM lên Firebase
+bool DongBoBaoThucLenFirebase()
+{
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return false;
+
+  FirebaseJson json;
+  for (uint8_t i = 0; i < MAX_BAO_THUC; i++)
+  {
+    FirebaseJson itemJson;
+    itemJson.set("gio", dsbaothuc[i].gio);
+    itemJson.set("phut", dsbaothuc[i].phut);
+    itemJson.set("active", dsbaothuc[i].active);
+
+    FirebaseJsonArray thuArr;
+    if (thuMaskBaoThuc[i] != 0xFF)
+    {
+      for (uint8_t day = 0; day < 7; day++)
+      {
+        if (thuMaskBaoThuc[i] & (uint8_t)(1U << day))
+          thuArr.add(day);
+      }
+    }
+    itemJson.set("thu", thuArr);
+
+    json.set("BaoThuc" + String(i + 1), itemJson);
+  }
+
+  if (!Firebase.RTDB.setJSON(&Data, F("/DongHo/dsBaoThuc"), &json))
+  {
+    Serial.printf("[Firebase] LOI dong bo danh sach bao thuc: %s\n", Data.errorReason().c_str());
+    return false;
+  }
+
+  Serial.println("[Firebase] Da dong bo danh sach bao thuc len Firebase.");
+  return true;
+}
+
+// Tắt riêng một báo thức theo index và đẩy trạng thái xuống Firebase ngay lập tức
+bool TatBaoThucMotLan(int index)
+{
+  if (index < 0 || index >= MAX_BAO_THUC)
+    return false;
+
+  String basePath = "/DongHo/dsBaoThuc/BaoThuc" + String(index + 1);
+  bool okActive = Firebase.RTDB.setBool(&Data, basePath + "/active", false);
+
+  FirebaseJsonArray emptyDays;
+  bool okDays = Firebase.RTDB.setArray(&Data, basePath + "/thu", &emptyDays);
+
+  if (!okActive || !okDays)
+  {
+    Serial.printf("[Firebase] LOI tat bao thuc mot lan #%d: active=%s, thu=%s\n",
+                  index + 1,
+                  okActive ? "OK" : Data.errorReason().c_str(),
+                  okDays ? "OK" : Data.errorReason().c_str());
+    return false;
+  }
+
+  Serial.printf("[Firebase] Da tat bao thuc mot lan #%d\n", index + 1);
+  return true;
 }
 
 // Cập nhật giờ hiển thị và đồng bộ lên Firebase
@@ -834,7 +935,11 @@ void BaoThuc(DateTime now)
 
   for (uint8_t i = 0; i < MAX_BAO_THUC; i++)
   {
-    if (dsbaothuc[i].active && now.hour() == dsbaothuc[i].gio && now.minute() == dsbaothuc[i].phut)
+    bool dungNgay = (thuMaskBaoThuc[i] == 0xFF) ||
+                    (thuMaskBaoThuc[i] == 0) ||
+                    (thuMaskBaoThuc[i] & (uint8_t)(1U << now.dayOfTheWeek()));
+
+    if (dsbaothuc[i].active && dungNgay && now.hour() == dsbaothuc[i].gio && now.minute() == dsbaothuc[i].phut)
     {
       tiengchuongreo = true;
       TimeBatDauChuongReo = millis();
@@ -843,6 +948,19 @@ void BaoThuc(DateTime now)
       phutcuoicung = now.minute();
       digitalWrite(BELL, HIGH);
       Serial.printf("\nBAO THUC SO %d KICH HOAT! (Reo trong %u giay, ngat quang 3s reo/2s nghi)\n", i + 1, ThoiGianReoGiay);
+
+      if (thuMaskBaoThuc[i] == 0)
+      {
+        dsbaothuc[i].active = false;
+        LuuBaoThucVaoFlash();
+
+        if (!TatBaoThucMotLan(i))
+        {
+          baoThucCanDongBoFirebase = true;
+          Serial.println("[Firebase] Chua tat duoc bao thuc 1 lan ngay lap tuc, se thu dong bo lai sau.");
+        }
+      }
+
       break;
     }
   }
@@ -912,6 +1030,32 @@ void XuLyDocBaoThucFirebase()
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
 
+  if (baoThucCanDongBoFirebase)
+  {
+    if (!firebaseDaKhoiTao || !Firebase.ready())
+      return;
+
+    int idxCanTat = -1;
+    for (int i = 0; i < MAX_BAO_THUC; i++)
+    {
+      if (!dsbaothuc[i].active && thuMaskBaoThuc[i] == 0)
+      {
+        idxCanTat = i;
+        break;
+      }
+    }
+
+    if (idxCanTat >= 0)
+    {
+      if (TatBaoThucMotLan(idxCanTat))
+      {
+        baoThucCanDongBoFirebase = false;
+      }
+    }
+
+    return;
+  }
+
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckFirebase > 7000 || TimeCheckFirebase == 0))
   {
     TimeCheckFirebase = millis();
@@ -936,6 +1080,7 @@ void XuLyDocBaoThucFirebase()
             pathGio = pathBaoThuc + "/gio";
             pathPhut = pathBaoThuc + "/phut";
             pathActive = pathBaoThuc + "/active";
+            String pathThu = pathBaoThuc + "/thu";
 
             json.get(resultGio, pathGio);
             json.get(resultPhut, pathPhut);
@@ -944,22 +1089,25 @@ void XuLyDocBaoThucFirebase()
             uint8_t g_moi = resultGio.success ? resultGio.intValue : 0;
             uint8_t p_moi = resultPhut.success ? resultPhut.intValue : 0;
             bool a_moi = resultActive.success ? resultActive.boolValue : false;
+            uint8_t thuMoi = DocThuMaskTuFirebase(json, pathThu);
 
-            if (dsbaothuc[i].gio != g_moi || dsbaothuc[i].phut != p_moi || dsbaothuc[i].active != a_moi)
+            if (dsbaothuc[i].gio != g_moi || dsbaothuc[i].phut != p_moi || dsbaothuc[i].active != a_moi || thuMaskBaoThuc[i] != thuMoi)
             {
               dsbaothuc[i].gio = g_moi;
               dsbaothuc[i].phut = p_moi;
               dsbaothuc[i].active = a_moi;
+              thuMaskBaoThuc[i] = thuMoi;
               coThayDoi = true;
             }
           }
           else
           {
-            if (dsbaothuc[i].gio != 0 || dsbaothuc[i].phut != 0 || dsbaothuc[i].active != false)
+            if (dsbaothuc[i].gio != 0 || dsbaothuc[i].phut != 0 || dsbaothuc[i].active != false || thuMaskBaoThuc[i] != 0xFF)
             {
               dsbaothuc[i].gio = 0;
               dsbaothuc[i].phut = 0;
               dsbaothuc[i].active = false;
+              thuMaskBaoThuc[i] = 0xFF;
               coThayDoi = true;
             }
           }
