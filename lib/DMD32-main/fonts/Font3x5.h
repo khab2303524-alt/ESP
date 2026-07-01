@@ -23,12 +23,18 @@ const uint8_t Font3x5_Custom[] PROGMEM = {
     
     // --- KÝ TỰ ĐẶC BIỆT 5x5 (Mỗi ký tự chiếm đúng 5 byte) ---
     0x11, 0x08, 0x04, 0x02, 0x11, // %  (index 10)
-    0x01, 0x00, 0x1F, 0x11, 0x11  // °C (index 11)
+    0x01, 0x00, 0x1F, 0x11, 0x11, // °C (index 11)
+
+    // --- CHỮ CÁI 3x5 CHO NHÃN NHIỆT ĐỘ / ĐỘ ẨM (Mỗi chữ chiếm đúng 3 byte) ---
+    0x1E, 0x05, 0x1E, // A (index 12)
+    0x01, 0x1F, 0x01, // T (index 13)
+    0x1F, 0x05, 0x1A, // R (index 14)
+    0x1F, 0x04, 0x1F  // H (index 15)
 };
 
 /**
  * Hàm vẽ một ký tự custom hỗ trợ thay đổi chiều rộng linh hoạt
- * @param width: 3 cho số, 5 cho ký tự % hoặc °C
+ * @param width: 3 cho số hoặc chữ cái A/T/R/H, 5 cho ký tự % hoặc °C
  */
 void drawCustomChar3x5(DMD &dmd, int x, int y, int index, int width) {
     int font_index = 4; // Bỏ qua 4 byte đầu định nghĩa font
@@ -40,6 +46,18 @@ void drawCustomChar3x5(DMD &dmd, int x, int y, int index, int width) {
             break;
         case 11: // Ký tự °C
             font_index += 35; // Sau 10 chữ số (30 byte) + 1 ký tự % (5 byte)
+            break;
+        case 12: // Chữ A
+            font_index += 40; // Sau 10 chữ số (30 byte) + % (5 byte) + °C (5 byte)
+            break;
+        case 13: // Chữ T
+            font_index += 43; // Sau chữ A (3 byte)
+            break;
+        case 14: // Chữ R
+            font_index += 46; // Sau chữ T (3 byte)
+            break;
+        case 15: // Chữ H
+            font_index += 49; // Sau chữ R (3 byte)
             break;
         default: // Từ 0 đến 9
             font_index += (index * 3);
@@ -57,6 +75,31 @@ void drawCustomChar3x5(DMD &dmd, int x, int y, int index, int width) {
             }
         }
     }
+}
+
+/**
+ * Tra cứu index font (3x5) tương ứng với 1 chữ cái nhãn.
+ * Hỗ trợ: 'A' (Ẩm), 'T' (Temp/Nhiệt độ), 'R' và 'H' (vd: ghép "RH" - Relative Humidity)
+ * @return index hợp lệ (12-15) để truyền vào drawCustomChar3x5, hoặc -1 nếu không hỗ trợ
+ */
+int layIndexChuCai3x5(char c) {
+    switch (toupper(c)) {
+        case 'A': return 12;
+        case 'T': return 13;
+        case 'R': return 14;
+        case 'H': return 15;
+        default:  return -1;
+    }
+}
+
+/**
+ * Hàm vẽ nhanh 1 chữ cái nhãn (A/T/R/H) tại vị trí (x, y), rộng cố định 3px.
+ * Ví dụ: ve1ChuCai3x5(dmd, 0, 0, 'T'); // vẽ chữ T làm nhãn nhiệt độ
+ */
+void ve1ChuCai3x5(DMD &dmd, int x, int y, char c) {
+    int idx = layIndexChuCai3x5(c);
+    if (idx < 0) return; // Ký tự không được hỗ trợ -> bỏ qua, không vẽ
+    drawCustomChar3x5(dmd, x, y, idx, 3);
 }
 
 /**
