@@ -75,6 +75,7 @@ baothuc dsbaothuc[MAX_BAO_THUC];
 uint8_t thuMaskBaoThuc[MAX_BAO_THUC];
 bool firebaseDaKhoiTao = false;
 bool baoThucCanDongBoFirebase = false;
+unsigned long TimeThuLaiDongBoBaoThuc = 0;
 
 bool apModeActive = false;
 
@@ -859,18 +860,18 @@ bool TatBaoThucMotLan(int index)
   if (index < 0 || index >= MAX_BAO_THUC)
     return false;
 
+  // Chi can ghi active=false la du de bao thuc khong reo lai (dungNgay chi duoc
+  // xet khi active == true). Khong ghi lai "thu" vi Firebase RTDB se tu xoa node
+  // khi ghi mang rong [], khien request nay gan nhu luon that bai va lam vong
+  // retry ben duoi chay vo han, spam Firebase moi vong loop().
   String basePath = "/DongHo/dsBaoThuc/BaoThuc" + String(index + 1);
   bool okActive = Firebase.RTDB.setBool(&Data, basePath + "/active", false);
 
-  FirebaseJsonArray emptyDays;
-  bool okDays = Firebase.RTDB.setArray(&Data, basePath + "/thu", &emptyDays);
-
-  if (!okActive || !okDays)
+  if (!okActive)
   {
-    Serial.printf("[Firebase] LOI tat bao thuc mot lan #%d: active=%s, thu=%s\n",
+    Serial.printf("[Firebase] LOI tat bao thuc mot lan #%d: active=%s\n",
                   index + 1,
-                  okActive ? "OK" : Data.errorReason().c_str(),
-                  okDays ? "OK" : Data.errorReason().c_str());
+                  Data.errorReason().c_str());
     return false;
   }
 
@@ -1043,19 +1044,25 @@ void XuLyDocBaoThucFirebase()
     if (!firebaseDaKhoiTao || !Firebase.ready())
       return;
 
-    bool daDongBo = false;
+    // Chi thu dong bo lai moi 3 giay, tranh goi Firebase lien tuc moi vong loop()
+    // gay qua tai SSL/TCP khi mang yeu hoac server phan hoi cham.
+    if (millis() - TimeThuLaiDongBoBaoThuc < 3000 && TimeThuLaiDongBoBaoThuc != 0)
+      return;
+    TimeThuLaiDongBoBaoThuc = millis();
+
+    bool conLoiSot = false;
     for (int i = 0; i < MAX_BAO_THUC; i++)
     {
       if (!dsbaothuc[i].active && LaBaoThucMotLan(i))
       {
-        if (TatBaoThucMotLan(i))
+        if (!TatBaoThucMotLan(i))
         {
-          daDongBo = true;
+          conLoiSot = true;
         }
       }
     }
 
-    if (daDongBo)
+    if (!conLoiSot)
     {
       baoThucCanDongBoFirebase = false;
     }
