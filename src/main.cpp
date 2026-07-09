@@ -17,7 +17,7 @@
 #define DATABASE_URL "https://dong-ho-dien-tu-daktdt-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define FIREBASE_AUTH "eAx4Js7aVrc2hSwqDcmbwhLdoucxe02370UUDGjM"
 
-#define BELL 25
+#define BELL 2
 #define DHTPIN 15
 #define MAX_BAO_THUC 50
 #define DHTTYPE DHT22
@@ -50,12 +50,18 @@ bool dangPhaNghiChuong = false;
 uint16_t ThoiGianReoGiay = 5;
 unsigned long TimeCheckThoiGianReo = 0;
 
+bool chuongThuCongFirebase = false;
+unsigned long TimeCheckChuongThuCong = 0;
+
 unsigned long TimeDocDS3231 = 0;
 unsigned long TimeDocDHT = 0;
 unsigned long TimeCheckFirebase = 0;
 unsigned long TimeCheckDatNgay = 0;
 unsigned long TimeCheckDatGio = 0;
 unsigned long TimeCheckDoSang = 0;
+
+bool dhtDaOnDinh = false;
+unsigned long thoiGianKhoiDongDht = 0;
 
 int8_t phutcuoicung = -1;
 int8_t NhietDo = 0;
@@ -125,6 +131,7 @@ void XuLyDatNgayFirebase();
 void XuLyDatGioFirebase();
 void XuLyDoSangFirebase();
 void XuLyThoiGianReoFirebase();
+uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now);
 void MatrixPanel();
 void KichHoatCauHinhFirebase();
 void DocBaoThucTuFlash();
@@ -146,6 +153,7 @@ void KhoiTaoManHinhLED();
 void KiemTraLaiRTC();
 void TaskKetNoiWifiBanDau(void *param);
 void BatAPMode();
+void XuLyChuongThuCongFirebase();
 
 // Đọc SSID/mật khẩu WiFi đã lưu trong flash
 void DocWifiTuFlash()
@@ -548,7 +556,7 @@ void VeDauPhanTram(int ox, int oy)
 void KhoiTaoManHinhLED()
 {
   SPI.begin(18, -1, 23, -1);
-  delay(50);
+  delay(200);
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
 
@@ -631,6 +639,9 @@ void setup()
   }
 
   dht.begin();
+  delay(200);
+
+  thoiGianKhoiDongDht = millis();
   pinMode(BELL, OUTPUT);
 
   xTaskCreatePinnedToCore(
@@ -644,49 +655,66 @@ void setup()
 }
 
 // Vòng lặp chính
+// Vòng lặp chính - Chống treo cứng, chống timeout Firebase và phản hồi chuông tức thời
 void loop()
 {
+  // 1. Các tác vụ bắt buộc phải chạy LIÊN TỤC và THỜI GIAN THỰC (Không được nghẽn)
   KiemTraLaiRTC();
-
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
 
-  BaoThuc(now);
-  KiemTraTatChuong();
-  MatrixPanel();
-  DongHo(now);
-  CamBienDHT();
-  KiemTraTatChuong();
-  MatrixPanel();
+  BaoThuc(now);       // Kiểm tra giờ reo chuông
+  KiemTraTatChuong(); // Kiểm tra tắt/bật chuông (Phản hồi ngay lập tức, không bị delay)
+  DongHo(now);        // Cập nhật biến thời gian
+  CamBienDHT();       // Đọc cảm biến
+  MatrixPanel();      // Cập nhật màn hình LED (Chỉ gọi 1 lần ở đầu/cuối loop là đủ mượt)
 
-  XuLyDocBaoThucFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
+  // 2. Sử dụng State Machine (Máy trạng thái) để CHIA NHỊP đọc Firebase
+  // Mỗi vòng loop() chỉ thực hiện ĐÚNG 1 hàm Firebase, các hàm còn lại sẽ đợi vòng sau.
+  // Điều này giúp loop() chạy cực nhanh, KiemTraTatChuong() được quét liên tục mà Firebase không bao giờ bị nghẽn/timeout.
+  static uint8_t buocFirebase = 0;
 
-  XuLyDatNgayFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyDatGioFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyDoSangFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyThoiGianReoFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyWifiFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyQuetWifiFirebase();
-  KiemTraTatChuong();
-  MatrixPanel();
-
-  XuLyAPMode();
+  switch (buocFirebase)
+  {
+  case 0:
+    XuLyDocBaoThucFirebase();
+    buocFirebase = 1;
+    break;
+  case 1:
+    XuLyDatNgayFirebase();
+    buocFirebase = 2;
+    break;
+  case 2:
+    XuLyDatGioFirebase();
+    buocFirebase = 3;
+    break;
+  case 3:
+    XuLyDoSangFirebase();
+    buocFirebase = 4;
+    break;
+  case 4:
+    XuLyThoiGianReoFirebase();
+    buocFirebase = 5;
+    break;
+  case 5:
+    XuLyChuongThuCongFirebase(); // Hàm này cần nhạy nên ưu tiên chu kỳ quét
+    buocFirebase = 6;
+    break;
+  case 6:
+    XuLyWifiFirebase();
+    buocFirebase = 7;
+    break;
+  case 7:
+    XuLyQuetWifiFirebase();
+    buocFirebase = 8;
+    break;
+  case 8:
+    XuLyAPMode();
+    buocFirebase = 0; // Quay lại bước đầu tiên
+    break;
+  default:
+    buocFirebase = 0;
+    break;
+  }
 }
 
 // Ngắt timer phần cứng, báo Task quét LED
@@ -978,57 +1006,85 @@ void BaoThuc(DateTime now)
 // Điều khiển nhịp chuông reo/nghỉ và tự tắt chuông
 void KiemTraTatChuong()
 {
-  if (!tiengchuongreo)
-    return;
-
-  unsigned long tongDaTroi = millis() - TimeBatDauChuongReo;
-
-  if (tongDaTroi >= (unsigned long)ThoiGianReoGiay * 1000UL)
+  // --- CHUÔNG THỦ CÔNG (Nếu true thì reo liên tục, không quan tâm gì khác) ---
+  if (chuongThuCongFirebase)
   {
-    tiengchuongreo = false;
-    digitalWrite(BELL, LOW);
-    Serial.println("\n--- Tu dong tat chuong thanh cong! ---");
-    return;
+    digitalWrite(BELL, HIGH);
+    return; // Thoát luôn không chạy code báo thức bên dưới
   }
 
-  if (dangPhaNghiChuong)
+  // --- NẾU KHÔNG BẬT CHUÔNG THỦ CÔNG -> CHẠY LOGIC BÁO THỨC CŨ ---
+  if (tiengchuongreo)
   {
-    digitalWrite(BELL, LOW);
-    if (millis() - TimeDoiPhaChuong >= THOI_GIAN_NGHI_PHA)
+    unsigned long tongDaTroi = millis() - TimeBatDauChuongReo;
+
+    if (tongDaTroi >= (unsigned long)ThoiGianReoGiay * 1000UL)
     {
-      dangPhaNghiChuong = false;
-      TimeDoiPhaChuong = millis();
+      tiengchuongreo = false;
+      digitalWrite(BELL, LOW);
+      Serial.println("\n--- Tu dong tat chuong thanh cong! ---");
+      return;
+    }
+
+    if (dangPhaNghiChuong)
+    {
+      digitalWrite(BELL, LOW);
+      if (millis() - TimeDoiPhaChuong >= THOI_GIAN_NGHI_PHA)
+      {
+        dangPhaNghiChuong = false;
+        TimeDoiPhaChuong = millis();
+      }
+    }
+    else
+    {
+      digitalWrite(BELL, !digitalRead(BELL));
+      if (millis() - TimeDoiPhaChuong >= THOI_GIAN_REO_PHA)
+      {
+        dangPhaNghiChuong = true;
+        TimeDoiPhaChuong = millis();
+        digitalWrite(BELL, LOW);
+      }
     }
   }
   else
   {
-    digitalWrite(BELL, !digitalRead(BELL));
-    if (millis() - TimeDoiPhaChuong >= THOI_GIAN_REO_PHA)
-    {
-      dangPhaNghiChuong = true;
-      TimeDoiPhaChuong = millis();
-      digitalWrite(BELL, LOW);
-    }
+    // Nếu cả báo thức và chuông thủ công đều không bật thì tắt hẳn còi
+    digitalWrite(BELL, LOW);
   }
 }
 
-// Đọc cảm biến nhiệt độ, độ ẩm
+// Đọc cảm biến nhiệt độ, độ ẩm (Đợi ổn định 20 giây đầu)
 void CamBienDHT()
 {
+  // Kiểm tra nếu đã qua 30 giây thì xác nhận DHT ổn định
+  if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 30000UL))
+  {
+    dhtDaOnDinh = true;
+    Serial.println("[DHT22] Cam bien da on dinh, bat dau gui du lieu.");
+  }
+
   if (millis() - TimeDocDHT > 15000 || TimeDocDHT == 0)
   {
     TimeDocDHT = millis();
     float temp = dht.readTemperature();
     float humi = dht.readHumidity();
+
     if (!isnan(temp) && !isnan(humi))
     {
-      if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
+      // CHỈ gửi Firebase và cập nhật giá trị hiển thị khi ĐÃ ỔN ĐỊNH
+      if (dhtDaOnDinh)
       {
-        Firebase.RTDB.setFloat(&Data, F("/CamBien/NhietDo"), temp);
-        Firebase.RTDB.setFloat(&Data, F("/CamBien/DoAm"), humi);
+        if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
+        {
+          FirebaseJson json;
+          json.set("NhietDo", temp);
+          json.set("DoAm", humi);
+
+          Firebase.RTDB.updateNode(&Data, F("/CamBien"), &json);
+        }
+        NhietDo = (int8_t)temp;
+        DoAm = (uint8_t)humi;
       }
-      NhietDo = (int8_t)temp;
-      DoAm = (uint8_t)humi;
     }
   }
 }
@@ -1299,30 +1355,179 @@ void TaskKhoiTaoNgatCore0(void *ThamSo)
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
-  timerAlarmWrite(timer, 1000, true);
+  timerAlarmWrite(timer, 300, true);
   timerAlarmEnable(timer);
 
   Serial.println("\n[He thong] Ngat cung da duoc ghim vao CORE 0!");
   vTaskDelete(NULL);
 }
 
+// Đọc dữ liệu ChuongThuCong từ Firebase: Đảm bảo cả BẬT và TẮT đều phản hồi tức thời (0.2s)
+void XuLyChuongThuCongFirebase()
+{
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+
+  // Đặt thời gian kiểm tra cố định là 200ms (0.2 giây) cho cả 2 trạng thái để tắt/bật đều nhạy
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckChuongThuCong >= 500 || TimeCheckChuongThuCong == 0))
+  {
+    TimeCheckChuongThuCong = millis();
+
+    if (Firebase.RTDB.getBool(&Data, F("/DongHo/ChuongThuCong")))
+    {
+      bool trangThaiMoi = Data.boolData();
+
+      // CHỈ THỰC HIỆN KHI CÓ SỰ THAY ĐỔI DỮ LIỆU THỰC SỰ
+      if (trangThaiMoi != chuongThuCongFirebase)
+      {
+        chuongThuCongFirebase = trangThaiMoi; // Cập nhật trạng thái mới
+
+        Serial.printf("[Firebase] Phat hien THAY DOI ChuongThuCong: %s\n", chuongThuCongFirebase ? "BAT" : "TAT");
+
+        // Thực hiện hành động ngay lập tức khi trạng thái thay đổi
+        if (chuongThuCongFirebase)
+        {
+          digitalWrite(BELL, HIGH); // Bật còi ngay khi nhận lệnh true từ app (độ trễ tối đa 0.2s)
+        }
+        else
+        {
+          digitalWrite(BELL, LOW); // Tắt còi ngay khi nhận lệnh false từ app (độ trễ tối đa 0.2s)
+        }
+      }
+    }
+  }
+}
+
+// --- ĐOẠN ĐÃ ĐƯỢC CHUẨN HÓA THEO ĐÚNG MẢNG DSBAOTHUC TRONG CODE CỦA BẠN ---
+uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
+{
+  if (!rtcOk)
+    return 0;
+
+  bool coBaoThucBat = false;
+  bool sapReoTrong10Phut = false;
+
+  // Đổi thời gian hiện tại ra tổng số phút trong ngày để dễ so sánh
+  uint32_t phutHienTai = now.hour() * 60 + now.minute();
+
+  // Quét qua mảng dsbaothuc (tối đa MAX_BAO_THUC phần tử) chính xác theo code của bạn
+  for (int i = 0; i < MAX_BAO_THUC; i++)
+  {
+    if (dsbaothuc[i].active) // Trong code của bạn trạng thái bật/tắt là biến .active
+    {
+      coBaoThucBat = true;
+
+      // Đổi thời gian báo thức ra tổng số phút trong ngày
+      uint32_t phutBaoThuc = dsbaothuc[i].gio * 60 + dsbaothuc[i].phut;
+
+      // Tính khoảng cách phút (xử lý cả trường hợp báo thức qua ngày mới)
+      int32_t khoangCachPhut = (int32_t)phutBaoThuc - (int32_t)phutHienTai;
+      if (khoangCachPhut < 0)
+      {
+        khoangCachPhut += 1440; // Cộng thêm 24 tiếng nếu giờ báo thức nhỏ hơn giờ hiện tại
+      }
+
+      // Nếu còn từ 1 đến 10 phút nữa là reo
+      if (khoangCachPhut > 0 && khoangCachPhut <= 10)
+      {
+        sapReoTrong10Phut = true;
+      }
+    }
+  }
+
+  if (sapReoTrong10Phut)
+    return 2; // Sắp reo trong 10p -> Icon chớp tắt
+  if (coBaoThucBat)
+    return 1; // Có báo thức đang bật -> Icon sáng đứng
+  return 0;   // Không có báo thức -> Icon biến mất, đẩy nhiệt độ ra giữa
+}
+
 // Hiển thị giờ, nhiệt độ/độ ẩm lên màn hình LED
 void MatrixPanel()
 {
+  DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
+
   static int8_t phutTruocDo = -1;
   static int8_t nhietDoTruocDo = -1;
   static int8_t doAmTruocDo = -1;
+  static uint8_t trangThaiBaoThucTruocDo = 99;
+
+  uint8_t trangThaiBaoThuc = KiemTraTrangThaiIconBaoThuc(now);
+  uint8_t toadoX_DongDuoi = (trangThaiBaoThuc == 0) ? 6 : 0;
+
   static unsigned long thoiGianToggle = 0;
   static bool dauHaiChamHien = true;
   static unsigned long thoiGianDoiCamBien = 0;
   static bool hienNhietDo = true;
 
   bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
+  bool trangThaiBaoThucThayDoi = (trangThaiBaoThuc != trangThaiBaoThucTruocDo);
+
   bool canToggle = (millis() - thoiGianToggle >= 500);
   bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 15000);
 
-  if (!phutThayDoi && !canToggle && !canDoiCamBien)
-    return;
+  // 1. XỬ LÝ NHỊP CHỚP TẮT ĐỒNG BỘ (Cục bộ, không ảnh hưởng tới viền)
+  if (canToggle)
+  {
+    thoiGianToggle = millis();
+    dauHaiChamHien = !dauHaiChamHien;
+
+    dmd.selectFont(System5x7);
+    if (dauHaiChamHien)
+    {
+      dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
+    }
+    else
+    {
+      // Thu hẹp vùng xóa dấu hai chấm từ hàng 2 đến hàng 6 (tránh hàng 0 và hàng 8 của viền)
+      dmd.drawFilledBox(14, 2, 16, 6, GRAPHICS_INVERSE);
+    }
+
+    // Nếu DHT chưa ổn định -> Chớp tắt 2 dấu gạch ngang
+    if (!dhtDaOnDinh)
+    {
+      if (dauHaiChamHien)
+      {
+        dmd.drawLine(9, 13, 14, 13, GRAPHICS_NORMAL);
+        dmd.drawLine(17, 13, 22, 13, GRAPHICS_NORMAL);
+      }
+      else
+      {
+        dmd.drawFilledBox(9, 13, 14, 13, GRAPHICS_INVERSE);
+        dmd.drawFilledBox(17, 13, 22, 13, GRAPHICS_INVERSE);
+      }
+    }
+
+    // Nếu đang ở trạng thái báo thức sắp reo -> Chớp tắt Icon
+    if (trangThaiBaoThuc == 2 && dhtDaOnDinh)
+    {
+      const uint8_t startX = 27;
+      const uint8_t startY = 11;
+
+      if (dauHaiChamHien)
+      {
+        dmd.writePixel(startX + 1, startY + 0, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 2, startY + 0, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 3, startY + 0, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 0, startY + 1, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 2, startY + 1, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 4, startY + 1, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 0, startY + 2, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 2, startY + 2, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 3, startY + 2, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 4, startY + 2, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 0, startY + 3, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 4, startY + 3, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 1, startY + 4, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 2, startY + 4, GRAPHICS_NORMAL, 1);
+        dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
+      }
+      else
+      {
+        dmd.drawFilledBox(startX, startY, startX + 4, startY + 4, GRAPHICS_INVERSE);
+      }
+    }
+  }
 
   if (canDoiCamBien)
   {
@@ -1331,61 +1536,82 @@ void MatrixPanel()
     phutThayDoi = true;
   }
 
-  if (canToggle)
-  {
-    thoiGianToggle = millis();
-    dauHaiChamHien = !dauHaiChamHien;
-  }
-
-  if (phutThayDoi)
+  // 2. KHỐI VẼ NỀN CHỮ SỐ (Chỉ chạy khi có sự thay đổi giá trị số)
+  if (phutThayDoi || trangThaiBaoThucThayDoi)
   {
     phutTruocDo = Phut;
     nhietDoTruocDo = NhietDo;
     doAmTruocDo = DoAm;
+    trangThaiBaoThucTruocDo = trangThaiBaoThuc;
 
-    dmd.clearScreen(true);
+    // SỬA TỌA ĐỘ TẠI ĐÂY: Thu hẹp vùng xóa (y từ 1->7 đổi thành 2->7) để không chạm vào khung viền hàng số 0
+    dmd.drawFilledBox(1, 2, 13, 7, GRAPHICS_INVERSE);  // Xóa vùng Giờ
+    dmd.drawFilledBox(17, 2, 30, 7, GRAPHICS_INVERSE); // Xóa vùng Phút
+    dmd.drawFilledBox(0, 9, 31, 15, GRAPHICS_INVERSE); // Xóa toàn bộ dòng dưới
+
     dmd.selectFont(System5x7);
-
     char TextGio[3];
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
 
-    dmd.drawString(1, 0, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(19, 0, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(2, 1, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(19, 1, TextPhut, 2, GRAPHICS_NORMAL);
 
-    if (hienNhietDo)
+    if (dauHaiChamHien)
+      dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
+
+    // --- XỬ LÝ DÒNG DƯỚI KHI ĐÃ ỔN ĐỊNH ---
+    if (dhtDaOnDinh)
     {
-      char textSo[3];
-      sprintf(textSo, "%02d", NhietDo);
-      dmd.drawString(5, 9, textSo, 2, GRAPHICS_NORMAL);
-      const uint8_t deg[2] = {0x60, 0x60};
-      for (int row = 0; row < 2; row++)
-        for (int col = 0; col < 2; col++)
-          if (deg[row] & (0x40 >> col))
-            dmd.writePixel(19 + col, 9 + row, GRAPHICS_NORMAL, 1);
-      dmd.drawChar(22, 9, 'C', GRAPHICS_NORMAL);
+      if (hienNhietDo)
+      {
+        ve1ChuCai3x5(dmd, toadoX_DongDuoi, 11, 'T');
+        ve1ChuCai3x5(dmd, toadoX_DongDuoi + 5, 11, ':');
+        char textSo[3];
+        sprintf(textSo, "%02d", NhietDo);
+        printIn3x5(dmd, toadoX_DongDuoi + 8, 11, textSo, 2);
+      }
+      else
+      {
+        ve1ChuCai3x5(dmd, toadoX_DongDuoi, 11, 'H');
+        ve1ChuCai3x5(dmd, toadoX_DongDuoi + 5, 11, ':');
+        char textDoAm[3];
+        sprintf(textDoAm, "%02d", DoAm);
+        printIn3x5(dmd, toadoX_DongDuoi + 8, 11, textDoAm, 1);
+      }
     }
     else
     {
-      char textSoAm[3];
-      sprintf(textSoAm, "%02d", DoAm);
-      dmd.drawString(5, 9, textSoAm, 2, GRAPHICS_NORMAL);
-      VeDauPhanTram(20, 9);
+      if (dauHaiChamHien)
+      {
+        dmd.drawLine(9, 13, 14, 13, GRAPHICS_NORMAL);
+        dmd.drawLine(17, 13, 22, 13, GRAPHICS_NORMAL);
+      }
     }
 
-    dmd.selectFont(System5x7);
-    if (dauHaiChamHien)
-      dmd.drawChar(14, 0, ':', GRAPHICS_NORMAL);
-    else
-      dmd.drawFilledBox(14, 0, 18, 7, GRAPHICS_INVERSE);
+    // --- ICON BÁO THỨC ĐỨNG YÊN (Nếu trạng thái = 1) ---
+    if (trangThaiBaoThuc == 1 && dhtDaOnDinh)
+    {
+      const uint8_t startX = 27;
+      const uint8_t startY = 11;
+      dmd.writePixel(startX + 1, startY + 0, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 2, startY + 0, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 3, startY + 0, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 0, startY + 1, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 2, startY + 1, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 4, startY + 1, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 0, startY + 2, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 2, startY + 2, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 3, startY + 2, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 4, startY + 2, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 0, startY + 3, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 4, startY + 3, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 1, startY + 4, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 2, startY + 4, GRAPHICS_NORMAL, 1);
+      dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
+    }
   }
-  else if (canToggle)
-  {
-    dmd.selectFont(System5x7);
-    if (dauHaiChamHien)
-      dmd.drawChar(14, 0, ':', GRAPHICS_NORMAL);
-    else
-      dmd.drawFilledBox(14, 0, 18, 7, GRAPHICS_INVERSE);
-  }
+
+  dmd.drawBox(0, 0, 31, 8, GRAPHICS_NORMAL);
 }
