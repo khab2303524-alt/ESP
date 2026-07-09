@@ -7,7 +7,10 @@
 #include <SPI.h>
 #include <DMD32.h>
 #include <Preferences.h>
-#include <WiFiManager.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
 
@@ -24,6 +27,18 @@
 
 #define DISPLAYS_ACROSS 1
 #define DISPLAYS_DOWN 1
+
+// UUID cho dịch vụ BLE cấu hình WiFi (thay thế WiFiManager AP portal)
+#define BLE_DEVICE_NAME "ESP32-DongHo-BLE"
+#define BLE_SERVICE_UUID "af9e5539-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+#define BLE_CHAR_SSID_UUID "af9e5540-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+#define BLE_CHAR_PASS_UUID "af9e5541-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+#define BLE_CHAR_COMMAND_UUID "af9e5542-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+#define BLE_CHAR_STATUS_UUID "af9e5543-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+#define BLE_CHAR_WIFILIST_UUID "af9e5544-1e8a-4de6-8b7f-1d2c3e4f5a6b"
+
+// Thời gian mất WiFi liên tục trước khi tự động bật BLE cứu hộ khi đang chạy (ms)
+#define THOI_GIAN_KET_MAT_WIFI_KICH_HOAT_BLE 60000UL
 
 FirebaseData Data;
 FirebaseAuth Auth;
@@ -83,8 +98,6 @@ bool firebaseDaKhoiTao = false;
 bool baoThucCanDongBoFirebase = false;
 unsigned long TimeThuLaiDongBoBaoThuc = 0;
 
-bool apModeActive = false;
-
 String wifiSSID = SSID_DEFAULT;
 String wifiPassword = PASSWORD_DEFAULT;
 
@@ -94,6 +107,26 @@ String pendingPass = "";
 
 volatile bool dangQuetWifi = false;
 unsigned long TimeCheckQuetWifi = 0;
+
+// --- Trạng thái BLE (thay cho WiFiManager AP Mode) ---
+BLEServer *pBleServer = nullptr;
+BLECharacteristic *pCharSsid = nullptr;
+BLECharacteristic *pCharPass = nullptr;
+BLECharacteristic *pCharCommand = nullptr;
+BLECharacteristic *pCharStatus = nullptr;
+BLECharacteristic *pCharWifiList = nullptr;
+
+bool bleModeActive = false;
+volatile bool bleClientConnected = false;
+String bleSsidNhan = "";
+String blePassNhan = "";
+volatile bool bleYeuCauQuet = false;
+volatile bool bleYeuCauKetNoi = false;
+volatile bool dangQuetWifiBLE = false;
+volatile bool dangKetNoiWifiBLE = false;
+
+unsigned long TimeBatDauMatWifi = 0;
+bool dangMatWifi = false;
 
 TaskHandle_t hTaskScanLED = NULL;
 
@@ -152,7 +185,11 @@ String SanitizeSsid(const String &s);
 void KhoiTaoManHinhLED();
 void KiemTraLaiRTC();
 void TaskKetNoiWifiBanDau(void *param);
-void BatAPMode();
+void KhoiDongBLE();
+void XuLyBLECommand();
+void KiemTraMatKetNoiWifiKichHoatBLE();
+void TaskQuetWifiBLE(void *param);
+void TaskKetNoiWifiBLE(void *param);
 void XuLyChuongThuCongFirebase();
 
 // Đọc SSID/mật khẩu WiFi đã lưu trong flash
@@ -187,34 +224,117 @@ void XoaWifiFlash()
   Serial.println("[Flash] Da xoa WiFi trong flash");
 }
 
-// Bật chế độ AP để người dùng cấu hình WiFi qua điện thoại
-void BatAPMode()
+// --- Callback khi điện thoại kết nối/ngắt kết nối BLE ---
+class BleServerCallback : public BLEServerCallbacks
 {
-  Serial.println("[AP] Bat AP Mode qua WiFiManager...");
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180);
-
-  wm.setSaveConfigCallback([]()
-                           { Serial.println("[AP] Da luu WiFi moi, dang restart..."); });
-
-  if (!wm.startConfigPortal("ESP32-Clock 192.168.4.1"))
+  void onConnect(BLEServer *pServer) override
   {
-    Serial.println("[AP] Timeout hoac that bai, restart...");
-    ESP.restart();
+    bleClientConnected = true;
+    Serial.println("[BLE] Dien thoai da ket noi BLE.");
   }
+  void onDisconnect(BLEServer *pServer) override
+  {
+    bleClientConnected = false;
+    Serial.println("[BLE] Dien thoai da ngat ket noi BLE, quang ba lai...");
+    delay(200);
+    pServer->startAdvertising();
+  }
+};
 
-  preferences.begin("WiFiCfg", false);
-  preferences.putString("ssid", WiFi.SSID());
-  preferences.putString("pass", WiFi.psk());
-  preferences.end();
-  Serial.printf("[AP] Ket noi thanh cong: %s\n", WiFi.SSID().c_str());
-  apModeActive = false;
+// --- Callback ghi SSID mới từ app ---
+class BleSsidCallback : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pChar) override
+  {
+    bleSsidNhan = String(pChar->getValue().c_str());
+    Serial.printf("[BLE] Nhan SSID: %s\n", bleSsidNhan.c_str());
+  }
+};
 
-  KichHoatCauHinhFirebase();
+// --- Callback ghi mật khẩu mới từ app ---
+class BlePassCallback : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pChar) override
+  {
+    blePassNhan = String(pChar->getValue().c_str());
+    Serial.println("[BLE] Da nhan mat khau WiFi qua BLE.");
+  }
+};
+
+// --- Callback lệnh điều khiển: "SCAN" để quét WiFi, "CONNECT" để thử kết nối ---
+class BleCommandCallback : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pChar) override
+  {
+    String lenh = String(pChar->getValue().c_str());
+    lenh.trim();
+    lenh.toUpperCase();
+    Serial.printf("[BLE] Nhan lenh: %s\n", lenh.c_str());
+
+    if (lenh == "SCAN")
+      bleYeuCauQuet = true;
+    else if (lenh == "CONNECT")
+      bleYeuCauKetNoi = true;
+  }
+};
+
+// Gửi trạng thái hiện tại cho app qua BLE (notify)
+void GuiTrangThaiBLE(const String &trangThai)
+{
+  if (pCharStatus == nullptr)
+    return;
+  pCharStatus->setValue(trangThai.c_str());
+  pCharStatus->notify();
 }
 
-// WiFiManager tự xử lý AP Mode, không cần làm gì thêm
-void XuLyAPMode() {}
+// Khởi động dịch vụ BLE để cấu hình WiFi (thay thế hoàn toàn WiFiManager AP Mode)
+void KhoiDongBLE()
+{
+  if (bleModeActive)
+    return;
+
+  Serial.println("[BLE] Dang khoi dong dich vu BLE cau hinh WiFi...");
+
+  BLEDevice::init(BLE_DEVICE_NAME);
+  pBleServer = BLEDevice::createServer();
+  pBleServer->setCallbacks(new BleServerCallback());
+
+  BLEService *pService = pBleServer->createService(BLE_SERVICE_UUID);
+
+  pCharSsid = pService->createCharacteristic(
+      BLE_CHAR_SSID_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pCharSsid->setCallbacks(new BleSsidCallback());
+
+  pCharPass = pService->createCharacteristic(
+      BLE_CHAR_PASS_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pCharPass->setCallbacks(new BlePassCallback());
+
+  pCharCommand = pService->createCharacteristic(
+      BLE_CHAR_COMMAND_UUID, BLECharacteristic::PROPERTY_WRITE);
+  pCharCommand->setCallbacks(new BleCommandCallback());
+
+  pCharStatus = pService->createCharacteristic(
+      BLE_CHAR_STATUS_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pCharStatus->addDescriptor(new BLE2902());
+  pCharStatus->setValue("IDLE");
+
+  pCharWifiList = pService->createCharacteristic(
+      BLE_CHAR_WIFILIST_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pCharWifiList->addDescriptor(new BLE2902());
+  pCharWifiList->setValue("");
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  BLEDevice::startAdvertising();
+
+  bleModeActive = true;
+  Serial.printf("[BLE] Da bat quang ba BLE voi ten: %s\n", BLE_DEVICE_NAME);
+}
 
 unsigned long TimeCheckWifi = 0;
 
@@ -528,6 +648,195 @@ void XuLyQuetWifiFirebase()
       1);
 }
 
+// Task quét WiFi lân cận và gửi kết quả qua BLE (dùng khi không có Internet)
+void TaskQuetWifiBLE(void *param)
+{
+  Serial.println("[BLE-Scan] Bat dau quet mang WiFi lan can...");
+  GuiTrangThaiBLE("SCANNING");
+
+  int soMang = WiFi.scanNetworks(false, false);
+  if (soMang < 0)
+    soMang = 0;
+
+  const int GIOI_HAN_MANG = 15;
+  const int GIOI_HAN_SAP_XEP = 64;
+
+  String danhSach = "";
+  int soDaThem = 0;
+  String daThem[GIOI_HAN_MANG];
+
+  if (soMang > 0)
+  {
+    int soPhanTu = soMang < GIOI_HAN_SAP_XEP ? soMang : GIOI_HAN_SAP_XEP;
+    int idx[GIOI_HAN_SAP_XEP];
+    for (int i = 0; i < soPhanTu; i++)
+      idx[i] = i;
+
+    for (int i = 0; i < soPhanTu - 1; i++)
+      for (int j = i + 1; j < soPhanTu; j++)
+        if (WiFi.RSSI(idx[j]) > WiFi.RSSI(idx[i]))
+        {
+          int tmp = idx[i];
+          idx[i] = idx[j];
+          idx[j] = tmp;
+        }
+
+    for (int k = 0; k < soPhanTu && soDaThem < GIOI_HAN_MANG; k++)
+    {
+      int i = idx[k];
+      String ssid = SanitizeSsid(WiFi.SSID(i));
+      if (ssid.length() == 0)
+        continue;
+
+      bool daTrung = false;
+      for (int m = 0; m < soDaThem; m++)
+        if (daThem[m] == ssid)
+        {
+          daTrung = true;
+          break;
+        }
+      if (daTrung)
+        continue;
+
+      daThem[soDaThem++] = ssid;
+
+      // Định dạng đơn giản, không cần JSON: "ssid,rssi;ssid,rssi;..."
+      if (danhSach.length() > 0)
+        danhSach += ";";
+      danhSach += ssid + "," + String(WiFi.RSSI(i));
+    }
+  }
+
+  WiFi.scanDelete();
+
+  Serial.printf("[BLE-Scan] Tim thay %d mang, gui %d mang qua BLE\n", soMang, soDaThem);
+
+  if (pCharWifiList != nullptr)
+  {
+    pCharWifiList->setValue(danhSach.c_str());
+    pCharWifiList->notify();
+  }
+  GuiTrangThaiBLE("SCAN_DONE");
+
+  dangQuetWifiBLE = false;
+  vTaskDelete(NULL);
+}
+
+// Task thử kết nối WiFi mới theo yêu cầu nhận qua BLE, báo kết quả qua notify
+void TaskKetNoiWifiBLE(void *param)
+{
+  String newSsid = bleSsidNhan;
+  String newPass = blePassNhan;
+
+  Serial.printf("[BLE-WiFi] Bat dau thu ket noi: ssid='%s'\n", newSsid.c_str());
+  GuiTrangThaiBLE("CONNECTING");
+
+  if (hTaskScanLED != NULL)
+    vTaskSuspend(hTaskScanLED);
+
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(true);
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  WiFi.begin(newSsid.c_str(), newPass.c_str());
+
+  if (hTaskScanLED != NULL)
+    vTaskResume(hTaskScanLED);
+
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < 15000)
+  {
+    vTaskDelay(pdMS_TO_TICKS(300));
+  }
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.printf("[BLE-WiFi] Ket noi thanh cong: %s\n", newSsid.c_str());
+
+    preferences.begin("WiFiCfg", false);
+    preferences.putString("ssid", newSsid);
+    preferences.putString("pass", newPass);
+    preferences.end();
+
+    wifiSSID = newSsid;
+    wifiPassword = newPass;
+
+    GuiTrangThaiBLE("CONNECTED:" + newSsid);
+    WiFi.setAutoReconnect(true);
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    KichHoatCauHinhFirebase();
+    bleModeActive = false;
+    dangMatWifi = false;
+  }
+  else
+  {
+    Serial.printf("[BLE-WiFi] That bai, ket noi lai WiFi cu: %s\n", wifiSSID.c_str());
+    GuiTrangThaiBLE("FAILED");
+
+    WiFi.disconnect(true);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    WiFi.setAutoReconnect(true);
+  }
+
+  dangKetNoiWifiBLE = false;
+  vTaskDelete(NULL);
+}
+
+// Xử lý các lệnh nhận qua BLE trong loop() chính (không chặn hệ thống)
+void XuLyBLECommand()
+{
+  if (!bleModeActive)
+    return;
+
+  if (bleYeuCauQuet && !dangQuetWifiBLE && !dangKetNoiWifiBLE)
+  {
+    bleYeuCauQuet = false;
+    dangQuetWifiBLE = true;
+    xTaskCreatePinnedToCore(TaskQuetWifiBLE, "TaskQuetWifiBLE", 8192, NULL, 1, NULL, 1);
+  }
+
+  if (bleYeuCauKetNoi && !dangKetNoiWifiBLE && !dangQuetWifiBLE)
+  {
+    bleYeuCauKetNoi = false;
+    if (bleSsidNhan.length() == 0)
+    {
+      GuiTrangThaiBLE("FAILED");
+    }
+    else
+    {
+      dangKetNoiWifiBLE = true;
+      xTaskCreatePinnedToCore(TaskKetNoiWifiBLE, "TaskKetNoiWifiBLE", 8192, NULL, 1, NULL, 1);
+    }
+  }
+}
+
+// Theo dõi mất kết nối WiFi khi đang chạy bình thường; nếu mất quá lâu (kẹt)
+// thì tự động bật BLE để người dùng có thể cấu hình lại WiFi qua điện thoại
+void KiemTraMatKetNoiWifiKichHoatBLE()
+{
+  if (bleModeActive)
+    return;
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    if (!dangMatWifi)
+    {
+      dangMatWifi = true;
+      TimeBatDauMatWifi = millis();
+    }
+    else if (millis() - TimeBatDauMatWifi >= THOI_GIAN_KET_MAT_WIFI_KICH_HOAT_BLE)
+    {
+      Serial.println("[BLE] WiFi bi ket qua lau, tu dong bat BLE de cuu ho...");
+      KhoiDongBLE();
+    }
+  }
+  else
+  {
+    dangMatWifi = false;
+  }
+}
+
 // Vẽ ký hiệu %
 void VeDauPhanTram(int ox, int oy)
 {
@@ -609,8 +918,8 @@ void TaskKetNoiWifiBanDau(void *param)
   }
   else
   {
-    Serial.println("\n[WiFi] Ket noi that bai! Bat AP Mode de cau hinh (chay nen, khong chan he thong).");
-    BatAPMode();
+    Serial.println("\n[WiFi] Ket noi that bai! Bat BLE de cau hinh qua dien thoai (chay nen, khong chan he thong).");
+    KhoiDongBLE();
   }
 
   vTaskDelete(NULL);
@@ -708,7 +1017,8 @@ void loop()
     buocFirebase = 8;
     break;
   case 8:
-    XuLyAPMode();
+    XuLyBLECommand();
+    KiemTraMatKetNoiWifiKichHoatBLE();
     buocFirebase = 0; // Quay lại bước đầu tiên
     break;
   default:
@@ -1556,7 +1866,7 @@ void MatrixPanel()
     sprintf(TextPhut, "%02d", Phut);
 
     dmd.drawString(2, 1, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(19, 1, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(18, 1, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
       dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
