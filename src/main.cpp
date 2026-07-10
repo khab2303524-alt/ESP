@@ -11,7 +11,6 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include "mbedtls/base64.h"
 
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
@@ -33,28 +32,6 @@
 // Cấu hình các UUID định danh Bluetooth BLE
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-
-String decodeBase64(String input)
-{
-  size_t inputLen = input.length();
-  size_t outputLen = 0;
-
-  uint8_t *output = (uint8_t *)malloc(inputLen + 1); // +1 cho null terminator
-  if (output == NULL)
-    return "";
-
-  if (mbedtls_base64_decode(output, inputLen, &outputLen,
-                            (const unsigned char *)input.c_str(), inputLen) != 0)
-  {
-    free(output);
-    return "";
-  }
-
-  output[outputLen] = '\0'; // null-terminate đúng vị trí sau khi decode
-  String result = String((char *)output);
-  free(output);
-  return result;
-}
 
 FirebaseData Data;
 FirebaseAuth Auth;
@@ -1341,8 +1318,8 @@ void MatrixPanel()
     nhietDoTruocDo = NhietDo;
     doAmTruocDo = DoAm;
     trangThaiBaoThucTruocDo = trangThaiBaoThuc;
-    dmd.drawFilledBox(2, 2, 14, 7, GRAPHICS_INVERSE);
-    dmd.drawFilledBox(16, 2, 29, 7, GRAPHICS_INVERSE);
+    dmd.drawFilledBox(2, 2, 13, 7, GRAPHICS_INVERSE);
+    dmd.drawFilledBox(16, 2, 30, 7, GRAPHICS_INVERSE);
     dmd.drawFilledBox(0, 9, 31, 15, GRAPHICS_INVERSE);
 
     dmd.selectFont(System5x7);
@@ -1350,8 +1327,8 @@ void MatrixPanel()
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
-    dmd.drawString(3, 1, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(18, 1, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(2, 1, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(19, 1, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
       dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
