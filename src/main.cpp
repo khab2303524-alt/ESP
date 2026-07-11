@@ -21,7 +21,7 @@
 #define DATABASE_URL "https://dong-ho-dien-tu-daktdt-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define FIREBASE_AUTH "eAx4Js7aVrc2hSwqDcmbwhLdoucxe02370UUDGjM"
 
-#define BELL 2
+#define BELL 25
 #define DHTPIN 15
 #define MAX_BAO_THUC 50
 #define DHTTYPE DHT22
