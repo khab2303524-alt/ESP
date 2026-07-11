@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <DMD32.h>
 
-// Định nghĩa Font: Số (3x5), riêng % và °C là (5x5) lưu trong bộ nhớ PROGMEM
+// Định nghĩa Font: Số (3x5), % (5x5), °C (6x5, gồm dấu độ 2x2 + 1px cách + chữ C 3x5) lưu trong bộ nhớ PROGMEM
 const uint8_t Font3x5_Custom[] PROGMEM = {
     3, 5, // Chiều rộng mặc định chữ số = 3, Chiều cao = 5
     0, 0, // Dự phòng
@@ -21,9 +21,11 @@ const uint8_t Font3x5_Custom[] PROGMEM = {
     0x1F, 0x15, 0x1F, // 8 (index 8)
     0x17, 0x15, 0x1F, // 9 (index 9)
 
-    // --- KÝ TỰ ĐẶC BIỆT 5x5 (Mỗi ký tự chiếm đúng 5 byte) ---
-    0x11, 0x08, 0x04, 0x02, 0x11, // %  (index 10)
-    0x01, 0x00, 0x1F, 0x11, 0x11, // °C (index 11)
+    // --- KÝ TỰ % (5x5, chấm 2x2 + nét chéo rõ ràng) ---
+    0x13, 0x0B, 0x04, 0x1A, 0x19, // %  (index 10)
+
+    // --- KÝ TỰ °C (6x5: dấu độ 2x2 ở 2 cột đầu, cách 1px, rồi chữ C 3x5 như cũ) ---
+    0x03, 0x03, 0x00, 0x1F, 0x11, 0x11, // °C (index 11)
 
     // --- CHỮ CÁI 3x5 CHO NHÃN NHIỆT ĐỘ / ĐỘ ẨM (Mỗi chữ chiếm đúng 3 byte) ---
     0x1E, 0x05, 0x1E, // A (index 12)
@@ -37,7 +39,7 @@ const uint8_t Font3x5_Custom[] PROGMEM = {
 
 /**
  * Hàm vẽ một ký tự custom hỗ trợ thay đổi chiều rộng linh hoạt
- * @param width: 1 cho dấu :, 3 cho số hoặc chữ cái, 5 cho ký tự % hoặc °C
+ * @param width: 1 cho dấu :, 3 cho số hoặc chữ cái, 5 cho ký tự %, 6 cho ký tự °C
  */
 void drawCustomChar3x5(DMD &dmd, int x, int y, int index, int width)
 {
@@ -53,19 +55,19 @@ void drawCustomChar3x5(DMD &dmd, int x, int y, int index, int width)
         font_index += 35; // Sau 10 chữ số (30 byte) + 1 ký tự % (5 byte)
         break;
     case 12:              // Chữ A
-        font_index += 40; // Sau 10 chữ số (30 byte) + % (5 byte) + °C (5 byte)
+        font_index += 41; // Sau 10 chữ số (30 byte) + % (5 byte) + °C (6 byte)
         break;
     case 13:              // Chữ T
-        font_index += 43; // Sau chữ A (3 byte)
+        font_index += 44; // Sau chữ A (3 byte)
         break;
     case 14:              // Chữ R
-        font_index += 46; // Sau chữ T (3 byte)
+        font_index += 47; // Sau chữ T (3 byte)
         break;
     case 15:              // Chữ H
-        font_index += 49; // Sau chữ R (3 byte)
+        font_index += 50; // Sau chữ R (3 byte)
         break;
     case 16:              // Dấu hai chấm :
-        font_index += 52; // Sau chữ H (3 byte) -> (49 + 3 = 52)
+        font_index += 53; // Sau chữ H (3 byte) -> (50 + 3 = 53)
         break;
     default: // Từ 0 đến 9
         font_index += (index * 3);
@@ -148,14 +150,14 @@ void printIn3x5(DMD &dmd, int x, int y, String targetStr, int type)
         }
     }
 
-    // In ký tự đuôi 5x5 đi kèm
+    // In ký tự đuôi đi kèm
     if (type == 1)
     {
         drawCustomChar3x5(dmd, current_x += 1, y, 10, 5);
     }
     else if (type == 2)
     {
-        drawCustomChar3x5(dmd, current_x += 1, y, 11, 5);
+        drawCustomChar3x5(dmd, current_x, y, 11, 6);
     }
 }
 

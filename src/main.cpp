@@ -127,6 +127,13 @@ void SafePrintln(const String &s)
     xSemaphoreGive(serialMutex);
 }
 
+unsigned long TimeBatDauMatKetNoi = 0;
+bool dangTheoDoiMatKetNoi = false;
+#define NGUONG_MAT_KET_NOI_MS 60000UL // 60 giay khong co mang -> bat BLE du phong
+
+unsigned long TimeGuiHeartbeat = 0;
+uint32_t heartbeatCounter = 0;
+
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
 void BaoThuc(DateTime now);
@@ -161,6 +168,45 @@ void TaskKetNoiWifiBanDau(void *param);
 void BatBLEMode();
 void XuLyChuongThuCongFirebase();
 
+// Theo doi thoi gian mat WiFi lien tuc, tu kich hoat BLE du phong neu qua lau
+void KiemTraMatKetNoiWifi()
+{
+  if (yeuCauDoiWifi || taskDoiWifiDangChay || dangQuetWifi)
+  {
+    dangTheoDoiMatKetNoi = false;
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    if (!dangTheoDoiMatKetNoi)
+    {
+      dangTheoDoiMatKetNoi = true;
+      TimeBatDauMatKetNoi = millis();
+    }
+    else if (!bleDangPhat && millis() - TimeBatDauMatKetNoi >= NGUONG_MAT_KET_NOI_MS)
+    {
+      Serial.println("[WiFi] Mat ket noi qua lau, kich hoat BLE du phong...");
+      BatBLEMode();
+    }
+  }
+  else
+  {
+    dangTheoDoiMatKetNoi = false;
+  }
+}
+
+// Gui "nhip tim" len Firebase de app phat hien mat ket noi
+void GuiHeartbeatFirebase()
+{
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+  if (millis() - TimeGuiHeartbeat < 5000 && TimeGuiHeartbeat != 0)
+    return;
+  TimeGuiHeartbeat = millis();
+  heartbeatCounter++;
+  Firebase.RTDB.setInt(&Data, F("/DongHo/Heartbeat"), heartbeatCounter);
+}
 // Đọc SSID/mật khẩu WiFi đã lưu trong flash
 void DocWifiTuFlash()
 {
@@ -647,6 +693,7 @@ void setup()
 void loop()
 {
   XuLyDoiWifiTuBLE();
+  KiemTraMatKetNoiWifi();
   KiemTraLaiRTC();
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
 
@@ -689,6 +736,10 @@ void loop()
     break;
   case 7:
     XuLyQuetWifiFirebase();
+    buocFirebase = 8;
+    break;
+  case 8:
+    GuiHeartbeatFirebase();
     buocFirebase = 0;
     break;
   default:
