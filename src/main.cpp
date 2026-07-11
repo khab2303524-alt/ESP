@@ -167,6 +167,7 @@ void KiemTraLaiRTC();
 void TaskKetNoiWifiBanDau(void *param);
 void BatBLEMode();
 void XuLyChuongThuCongFirebase();
+void TaskMatrixPanel(void *param);
 
 // Theo doi thoi gian mat WiFi lien tuc, tu kich hoat BLE du phong neu qua lau
 void KiemTraMatKetNoiWifi()
@@ -494,7 +495,14 @@ void TaskQuetWifi(void *param)
 {
   Serial.println("[WiFi-Scan] Bat dau quet mang WiFi lan can...");
 
-  int soMang = WiFi.scanNetworks(false, false);
+  WiFi.scanNetworks(true, false); // quet bat dong bo, khong chan CPU
+
+  int soMang = WIFI_SCAN_RUNNING;
+  while (soMang == WIFI_SCAN_RUNNING)
+  {
+    vTaskDelay(pdMS_TO_TICKS(100)); // nhuong CPU cho loop() trong luc cho
+    soMang = WiFi.scanComplete();
+  }
   if (soMang < 0)
     soMang = 0;
 
@@ -688,6 +696,7 @@ void setup()
   pinMode(BELL, OUTPUT);
 
   xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
 }
 
 void loop()
@@ -696,12 +705,10 @@ void loop()
   KiemTraMatKetNoiWifi();
   KiemTraLaiRTC();
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
-
   BaoThuc(now);
   KiemTraTatChuong();
   DongHo(now);
   CamBienDHT();
-  MatrixPanel();
 
   static uint8_t buocFirebase = 0;
   switch (buocFirebase)
@@ -762,6 +769,15 @@ void TaskScanLED(void *param)
   {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     dmd.scanDisplayBySPI();
+  }
+}
+
+void TaskMatrixPanel(void *param)
+{
+  for (;;)
+  {
+    MatrixPanel();
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -1284,7 +1300,7 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
 
 void MatrixPanel()
 {
-  DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
+  DateTime now = DateTime(2020, 1, 1, Gio, Phut, Giay);
   static int8_t phutTruocDo = -1;
   static int8_t nhietDoTruocDo = -1;
   static int8_t doAmTruocDo = -1;
