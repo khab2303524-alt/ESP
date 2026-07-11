@@ -129,7 +129,7 @@ void SafePrintln(const String &s)
 
 unsigned long TimeBatDauMatKetNoi = 0;
 bool dangTheoDoiMatKetNoi = false;
-#define NGUONG_MAT_KET_NOI_MS 60000UL // 60 giay khong co mang -> bat BLE du phong
+#define NGUONG_MAT_KET_NOI_MS 60000UL
 
 unsigned long TimeGuiHeartbeat = 0;
 uint32_t heartbeatCounter = 0;
@@ -166,6 +166,7 @@ void KhoiTaoManHinhLED();
 void KiemTraLaiRTC();
 void TaskKetNoiWifiBanDau(void *param);
 void BatBLEMode();
+void TatBLEMode();
 void XuLyChuongThuCongFirebase();
 void TaskMatrixPanel(void *param);
 
@@ -194,6 +195,12 @@ void KiemTraMatKetNoiWifi()
   else
   {
     dangTheoDoiMatKetNoi = false;
+    // WiFi da tu phuc hoi (qua AutoReconnect) -> khong can BLE nua, tat de tranh
+    // chiem radio 2.4GHz vinh vien va tiet kiem nang luong.
+    if (bleDangPhat)
+    {
+      TatBLEMode();
+    }
   }
 }
 
@@ -299,6 +306,16 @@ void BatBLEMode()
   Serial.println("[BLE] Bluetooth hoat dong! Vui long mo Ung dung de dong bo Wi-Fi.");
 }
 
+// Tat han BLE server/advertising va giai phong radio khi khong con can dung nua
+void TatBLEMode()
+{
+  if (!bleDangPhat)
+    return;
+  BLEDevice::deinit(true);
+  bleDangPhat = false;
+  Serial.println("[BLE] Da tat Bluetooth du phong (WiFi da on dinh tro lai).");
+}
+
 unsigned long TimeCheckWifi = 0;
 
 // Task đổi sang WiFi mới theo yêu cầu từ app/Firebase/Bluetooth
@@ -317,6 +334,11 @@ void TaskDoiWifi(void *param)
   vTaskDelay(pdMS_TO_TICKS(1000));
   WiFi.begin(newSsid.c_str(), newPass.c_str());
 
+  if (bleDangPhat)
+  {
+    BLEDevice::getAdvertising()->stop();
+  }
+
   if (hTaskScanLED != NULL)
     vTaskResume(hTaskScanLED);
 
@@ -334,6 +356,12 @@ void TaskDoiWifi(void *param)
   {
     Serial.printf("\n[WiFi-Task] Thanh cong: %s\n", newSsid.c_str());
     Serial.printf("[WiFi] SSID hien tai: %s\n", WiFi.SSID().c_str());
+
+    // Neu ket noi thanh cong, khong can BLE nua
+    if (bleDangPhat)
+    {
+      TatBLEMode();
+    }
 
     // Nếu kết nối đến từ BLE (lúc mất mạng), Firebase chưa từng được kích hoạt -> kích hoạt ngay
     if (!firebaseDaKhoiTao)
@@ -401,7 +429,17 @@ void TaskDoiWifi(void *param)
     // Nếu kết nối Wi-Fi mới thất bại mà Wi-Fi cũ cũng chết, tiếp tục duy trì BLE
     if (WiFi.status() != WL_CONNECTED)
     {
-      BatBLEMode();
+      // bleDangPhat van con true (chi advertising bi stop o tren), nen goi lai
+      // startAdvertising() truc tiep thay vi BatBLEMode() (se no-op vi da "dang phat").
+      if (bleDangPhat)
+      {
+        BLEDevice::startAdvertising();
+        Serial.println("[BLE] Khoi dong lai advertising du phong.");
+      }
+      else
+      {
+        BatBLEMode();
+      }
     }
   }
 
