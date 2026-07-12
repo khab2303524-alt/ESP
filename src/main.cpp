@@ -529,7 +529,9 @@ void XuLyWifiFirebase()
   yeuCauDoiWifi = true;
   taskDoiWifiDangChay = true; // đánh dấu để XuLyDoiWifiTuBLE() không tạo task trùng lặp
 
-  xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifi", 8192, NULL, 1, NULL, 1);
+  // Cung ly do voi TaskQuetWifi: ham nay goi Firebase HTTPS nhieu lan lien tiep
+  // (trangThai co retry + ssidHienTai), tang stack de tranh tran nhu TaskQuetWifi.
+  xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifi", 20480, NULL, 1, NULL, 1);
 }
 
 String JsonEscape(const String &s)
@@ -564,14 +566,13 @@ void TaskQuetWifi(void *param)
 {
   Serial.println("[WiFi-Scan] Bat dau quet mang WiFi lan can...");
 
-  WiFi.scanNetworks(true, false); // quet bat dong bo, khong chan CPU
-
-  int soMang = WIFI_SCAN_RUNNING;
-  while (soMang == WIFI_SCAN_RUNNING)
-  {
-    vTaskDelay(pdMS_TO_TICKS(100)); // nhuong CPU cho loop() trong luc cho
-    soMang = WiFi.scanComplete();
-  }
+  // Quet dong bo (blocking). Quet bat dong bo (WiFi.scanNetworks(true,...))
+  // goi tu mot Task phu (khong phai Task chinh cua Arduino) hay bi loi tren
+  // ESP32 Arduino core, dan toi scanComplete() tra ve 0 mang du xung quanh
+  // co song - day chinh la nguyen nhan "Tim thay 0 mang". Quet dong bo it
+  // bug hon nhieu du chan Task nay trong vai giay (khong sao vi no chay
+  // tren Task rieng, khong lam treo loop() chinh).
+  int soMang = WiFi.scanNetworks(false, false);
   if (soMang < 0)
     soMang = 0;
 
@@ -635,12 +636,44 @@ void TaskQuetWifi(void *param)
 
   WiFi.scanDelete();
 
+  Serial.printf("[WiFi-Scan] Tim thay %d mang, gui %d mang len Firebase\n", soMang, soDaThem);
+
   if (Firebase.ready())
   {
+    // Dung 2 FirebaseData rieng cho 2 request: neu dung chung 1 object, khi
+    // request dau (setArray) that bai, session/buffer cua object do co the
+    // bi "dinh" trang thai loi, khien request sau (setBool) cung bao loi
+    // an theo kieu "No data supplied" du ban than no khong lien quan.
     FirebaseData scanData;
-    scanData.setBSSLBufferSize(4096, 1024);
-    Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
-    Firebase.RTDB.setBool(&scanData, F("/WiFi/quetLuoi"), false);
+    scanData.setBSSLBufferSize(4096, 4096);
+
+    bool okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
+    if (!okList)
+    {
+      Serial.printf("[Firebase] LOI ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
+      vTaskDelay(pdMS_TO_TICKS(300));
+      okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
+      if (!okList)
+        Serial.printf("[Firebase] LOI lan 2 ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
+      else
+        Serial.println("[Firebase] Ghi /WiFi/danhSachWifi thanh cong o lan thu 2!");
+    }
+    else
+    {
+      Serial.println("[Firebase] Da ghi /WiFi/danhSachWifi thanh cong!");
+    }
+
+    // Chi bao "xong" cho app sau khi da thu ghi (thanh cong hoac het luot retry),
+    // tranh truong hop app thay quetLuoi=false ma Firebase chua co du lieu moi.
+    FirebaseData flagData;
+    flagData.setBSSLBufferSize(2048, 1024);
+    bool okFlag = Firebase.RTDB.setBool(&flagData, F("/WiFi/quetLuoi"), false);
+    if (!okFlag)
+      Serial.printf("[Firebase] LOI ghi /WiFi/quetLuoi=false: %s\n", flagData.errorReason().c_str());
+  }
+  else
+  {
+    Serial.println("[Firebase] Firebase chua san sang, bo qua ghi ket qua quet lan nay.");
   }
 
   dangQuetWifi = false;
@@ -667,7 +700,11 @@ void XuLyQuetWifiFirebase()
     return;
 
   dangQuetWifi = true;
-  xTaskCreatePinnedToCore(TaskQuetWifi, "TaskQuetWifi", 8192, NULL, 1, NULL, 1);
+  // 8192 byte la khong du: moi lan goi HTTPS/TLS toi Firebase (mbedTLS
+  // handshake) co the ton 4-6KB stack, ma ham nay goi HTTPS 2 LAN LIEN TIEP
+  // (setArray + setBool) cong voi cac bien cuc bo (String[20], FirebaseJsonArray)
+  // => tran stack, crash "stack overflow in task TaskQuetWifi". Tang len 20480.
+  xTaskCreatePinnedToCore(TaskQuetWifi, "TaskQuetWifi", 20480, NULL, 1, NULL, 1);
 }
 
 void VeDauPhanTram(int ox, int oy)
