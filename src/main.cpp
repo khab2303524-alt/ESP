@@ -105,6 +105,8 @@ unsigned long TimeCheckQuetWifi = 0;
 TaskHandle_t hTaskScanLED = NULL;
 volatile bool canScan = false;
 SemaphoreHandle_t serialMutex = NULL;
+SemaphoreHandle_t baoThucMutex = NULL; // bao ve mang dsbaothuc[]/thuMaskBaoThuc[] khoi truy cap dong thoi
+bool taskDocBaoThucDaTao = false;
 
 BLECharacteristic *pCharacteristic;
 bool bleDangPhat = false;
@@ -169,6 +171,7 @@ void BatBLEMode();
 void TatBLEMode();
 void XuLyChuongThuCongFirebase();
 void TaskMatrixPanel(void *param);
+void TaskDocBaoThucFirebase(void *param);
 
 // Theo doi thoi gian mat WiFi lien tuc, tu kich hoat BLE du phong neu qua lau
 void KiemTraMatKetNoiWifi()
@@ -390,10 +393,16 @@ void TaskDoiWifi(void *param)
       Serial.println("[WiFi-Task] Firebase chua san sang, se ghi lai sau khi restart");
     }
 
+    if (hTaskScanLED != NULL)
+      vTaskSuspend(hTaskScanLED); // tam dung quet LED trong luc ghi flash de tranh giat hinh
+
     preferences.begin("WiFiCfg", false);
     preferences.putString("ssid", newSsid);
     preferences.putString("pass", newPass);
     preferences.end();
+
+    if (hTaskScanLED != NULL)
+      vTaskResume(hTaskScanLED);
 
     vTaskDelay(pdMS_TO_TICKS(1500));
     ESP.restart();
@@ -661,7 +670,7 @@ void KhoiTaoManHinhLED()
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
 
-  xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore0, "InitNgatCore0", 2048, NULL, configMAX_PRIORITIES, NULL, 0);
+  xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore0, "InitScanLED", 2048, NULL, configMAX_PRIORITIES, NULL, 1);
 }
 
 void KiemTraLaiRTC()
@@ -715,6 +724,7 @@ void setup()
   delay(200);
 
   serialMutex = xSemaphoreCreateMutex();
+  baoThucMutex = xSemaphoreCreateMutex();
   KhoiTaoManHinhLED();
   DocBaoThucTuFlash();
 
@@ -831,6 +841,14 @@ void KichHoatCauHinhFirebase()
     Firebase.reconnectWiFi(true);
     firebaseDaKhoiTao = true;
     Serial.println("[Firebase] Da kich hoat cau hinh Firebase an toan!");
+  }
+
+  // Task doc bao thuc rieng, khong phu thuoc loop() -> co the poll nhanh hon
+  // ma khong lam nghen state machine Firebase khac (WiFi, DoSang, ChuongThuCong...)
+  if (!taskDocBaoThucDaTao)
+  {
+    taskDocBaoThucDaTao = true;
+    xTaskCreatePinnedToCore(TaskDocBaoThucFirebase, "TaskDocBaoThuc", 8192, NULL, 1, NULL, 1);
   }
 }
 
@@ -989,6 +1007,9 @@ void BaoThuc(DateTime now)
       phutcuoicung = -1;
     return;
   }
+  if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(50)) != pdTRUE)
+    return; // task doc Firebase dang ghi, bo qua vong nay, thu lai vong sau (BaoThuc goi lien tuc trong loop)
+
   for (uint8_t i = 0; i < MAX_BAO_THUC; i++)
   {
     bool dungNgay = (thuMaskBaoThuc[i] == 0xFF) || (thuMaskBaoThuc[i] == 0) || (thuMaskBaoThuc[i] & (uint8_t)(1U << now.dayOfTheWeek()));
@@ -1003,13 +1024,16 @@ void BaoThuc(DateTime now)
       if (LaBaoThucMotLan(i))
       {
         dsbaothuc[i].active = false;
+        xSemaphoreGive(baoThucMutex);
         LuuBaoThucVaoFlash();
         if (!TatBaoThucMotLan(i))
           baoThucCanDongBoFirebase = true;
+        return;
       }
       break;
     }
   }
+  xSemaphoreGive(baoThucMutex);
 }
 
 void KiemTraTatChuong()
@@ -1039,7 +1063,7 @@ void KiemTraTatChuong()
     }
     else
     {
-      digitalWrite(BELL, !digitalRead(BELL));
+      digitalWrite(BELL, HIGH);
       if (millis() - TimeDoiPhaChuong >= THOI_GIAN_REO_PHA)
       {
         dangPhaNghiChuong = true;
@@ -1080,18 +1104,24 @@ void CamBienDHT()
   }
 }
 
+// Chi con xu ly dong bo NGUOC len Firebase (khi bao thuc mot-lan tu tat cuc bo
+// nhung lan ghi truoc do that bai). Phan DOC bao thuc tu Firebase ve da chuyen
+// sang TaskDocBaoThucFirebase() de khong bi rang buoc boi nhip cua loop() state machine.
 void XuLyDocBaoThucFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (baoThucCanDongBoFirebase)
+  if (!baoThucCanDongBoFirebase)
+    return;
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+  if (millis() - TimeThuLaiDongBoBaoThuc < 3000 && TimeThuLaiDongBoBaoThuc != 0)
+    return;
+  TimeThuLaiDongBoBaoThuc = millis();
+
+  bool conLoiSot = false;
+  if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(200)) == pdTRUE)
   {
-    if (!firebaseDaKhoiTao || !Firebase.ready())
-      return;
-    if (millis() - TimeThuLaiDongBoBaoThuc < 3000 && TimeThuLaiDongBoBaoThuc != 0)
-      return;
-    TimeThuLaiDongBoBaoThuc = millis();
-    bool conLoiSot = false;
     for (int i = 0; i < MAX_BAO_THUC; i++)
     {
       if (!dsbaothuc[i].active && LaBaoThucMotLan(i))
@@ -1100,65 +1130,91 @@ void XuLyDocBaoThucFirebase()
           conLoiSot = true;
       }
     }
-    if (!conLoiSot)
-      baoThucCanDongBoFirebase = false;
-    return;
+    xSemaphoreGive(baoThucMutex);
   }
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckFirebase > 7000 || TimeCheckFirebase == 0))
+  else
   {
-    TimeCheckFirebase = millis();
-    if (Firebase.RTDB.getJSON(&Data, F("/DongHo/dsBaoThuc")))
+    conLoiSot = true; // khong lay duoc mutex, thu lai lan sau
+  }
+
+  if (!conLoiSot)
+    baoThucCanDongBoFirebase = false;
+}
+
+// Task rieng: doc /DongHo/dsBaoThuc tu Firebase ve dinh ky, nhanh hon nhieu so voi
+// truoc (7000ms) ma khong lam nghen loop()/cac buoc Firebase khac vi chay tren task
+// va FirebaseData rieng (baoThucData), khong dung chung &Data voi loop().
+void TaskDocBaoThucFirebase(void *param)
+{
+  FirebaseData baoThucData;
+  baoThucData.setBSSLBufferSize(4096, 1024);
+
+  const TickType_t KHOANG_NGHI = pdMS_TO_TICKS(1200); // ~1.2s, nhanh hon 7s truoc do
+
+  for (;;)
+  {
+    if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
     {
-      if (Data.dataTypeEnum() == fb_esp_rtdb_data_type_json)
+      if (Firebase.RTDB.getJSON(&baoThucData, F("/DongHo/dsBaoThuc")))
       {
-        FirebaseJson &json = Data.jsonObject();
-        FirebaseJsonData resultBaoThuc, resultGio, resultPhut, resultActive;
-        String pathBaoThuc, pathGio, pathPhut, pathActive;
-        bool coThayDoi = false;
-        for (int i = 0; i < MAX_BAO_THUC; i++)
+        if (baoThucData.dataTypeEnum() == fb_esp_rtdb_data_type_json)
         {
-          pathBaoThuc = "/BaoThuc" + String(i + 1);
-          json.get(resultBaoThuc, pathBaoThuc);
-          if (resultBaoThuc.success && resultBaoThuc.type == "object")
+          FirebaseJson &json = baoThucData.jsonObject();
+          FirebaseJsonData resultBaoThuc, resultGio, resultPhut, resultActive;
+          String pathBaoThuc, pathGio, pathPhut, pathActive;
+          bool coThayDoi = false;
+
+          if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(200)) == pdTRUE)
           {
-            pathGio = pathBaoThuc + "/gio";
-            pathPhut = pathBaoThuc + "/phut";
-            pathActive = pathBaoThuc + "/active";
-            String pathThu = pathBaoThuc + "/thu";
-            json.get(resultGio, pathGio);
-            json.get(resultPhut, pathPhut);
-            json.get(resultActive, pathActive);
-            uint8_t g_moi = resultGio.success ? resultGio.intValue : 0;
-            uint8_t p_moi = resultPhut.success ? resultPhut.intValue : 0;
-            bool a_moi = resultActive.success ? resultActive.boolValue : false;
-            uint8_t thuMoi = DocThuMaskTuFirebase(json, pathThu);
-            if (dsbaothuc[i].gio != g_moi || dsbaothuc[i].phut != p_moi || dsbaothuc[i].active != a_moi || thuMaskBaoThuc[i] != thuMoi)
+            for (int i = 0; i < MAX_BAO_THUC; i++)
             {
-              dsbaothuc[i].gio = g_moi;
-              dsbaothuc[i].phut = p_moi;
-              dsbaothuc[i].active = a_moi;
-              thuMaskBaoThuc[i] = thuMoi;
-              coThayDoi = true;
+              pathBaoThuc = "/BaoThuc" + String(i + 1);
+              json.get(resultBaoThuc, pathBaoThuc);
+              if (resultBaoThuc.success && resultBaoThuc.type == "object")
+              {
+                pathGio = pathBaoThuc + "/gio";
+                pathPhut = pathBaoThuc + "/phut";
+                pathActive = pathBaoThuc + "/active";
+                String pathThu = pathBaoThuc + "/thu";
+                json.get(resultGio, pathGio);
+                json.get(resultPhut, pathPhut);
+                json.get(resultActive, pathActive);
+                uint8_t g_moi = resultGio.success ? resultGio.intValue : 0;
+                uint8_t p_moi = resultPhut.success ? resultPhut.intValue : 0;
+                bool a_moi = resultActive.success ? resultActive.boolValue : false;
+                uint8_t thuMoi = DocThuMaskTuFirebase(json, pathThu);
+                if (dsbaothuc[i].gio != g_moi || dsbaothuc[i].phut != p_moi || dsbaothuc[i].active != a_moi || thuMaskBaoThuc[i] != thuMoi)
+                {
+                  dsbaothuc[i].gio = g_moi;
+                  dsbaothuc[i].phut = p_moi;
+                  dsbaothuc[i].active = a_moi;
+                  thuMaskBaoThuc[i] = thuMoi;
+                  coThayDoi = true;
+                }
+              }
+              else
+              {
+                if (dsbaothuc[i].gio != 0 || dsbaothuc[i].phut != 0 || dsbaothuc[i].active != false || thuMaskBaoThuc[i] != 0xFF)
+                {
+                  dsbaothuc[i].gio = 0;
+                  dsbaothuc[i].phut = 0;
+                  dsbaothuc[i].active = false;
+                  thuMaskBaoThuc[i] = 0xFF;
+                  coThayDoi = true;
+                }
+              }
             }
+            xSemaphoreGive(baoThucMutex);
           }
-          else
+
+          if (coThayDoi)
           {
-            if (dsbaothuc[i].gio != 0 || dsbaothuc[i].phut != 0 || dsbaothuc[i].active != false || thuMaskBaoThuc[i] != 0xFF)
-            {
-              dsbaothuc[i].gio = 0;
-              dsbaothuc[i].phut = 0;
-              dsbaothuc[i].active = false;
-              thuMaskBaoThuc[i] = 0xFF;
-              coThayDoi = true;
-            }
+            LuuBaoThucVaoFlash();
           }
-        }
-        if (coThayDoi)
-        {
-          LuuBaoThucVaoFlash();
         }
       }
     }
+    vTaskDelay(KHOANG_NGHI);
   }
 }
 
@@ -1270,7 +1326,9 @@ void XuLyThoiGianReoFirebase()
 
 void TaskKhoiTaoNgatCore0(void *ThamSo)
 {
-  xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, configMAX_PRIORITIES - 1, &hTaskScanLED, 0);
+  // ── FIX: dời task quét LED + timer sang Core 1, tranh xa Core 0 (noi WiFi/BLE stack
+  // dang chay), de khong bi tranh chap CPU gay giat/nhap nhay man hinh o tan so thap ──
+  xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, configMAX_PRIORITIES - 1, &hTaskScanLED, 1);
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
@@ -1309,9 +1367,14 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
 {
   if (!rtcOk)
     return 0;
+  static uint8_t trangThaiGanNhat = 0; // fallback khi khong lay duoc mutex, tranh nhay icon sai trong 1 khung hinh
   bool coBaoThucBat = false;
   bool sapReoTrong10Phut = false;
   uint32_t phutHienTai = now.hour() * 60 + now.minute();
+
+  if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(20)) != pdTRUE)
+    return trangThaiGanNhat; // task doc Firebase dang ghi; giu nguyen icon cu, khong glitch
+
   for (int i = 0; i < MAX_BAO_THUC; i++)
   {
     if (dsbaothuc[i].active)
@@ -1329,11 +1392,15 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
       }
     }
   }
+  xSemaphoreGive(baoThucMutex);
+
   if (sapReoTrong10Phut)
-    return 2;
-  if (coBaoThucBat)
-    return 1;
-  return 0;
+    trangThaiGanNhat = 2;
+  else if (coBaoThucBat)
+    trangThaiGanNhat = 1;
+  else
+    trangThaiGanNhat = 0;
+  return trangThaiGanNhat;
 }
 
 void MatrixPanel()
