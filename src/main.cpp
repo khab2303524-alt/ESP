@@ -21,7 +21,7 @@
 #define DATABASE_URL "https://dong-ho-dien-tu-daktdt-default-rtdb.asia-southeast1.firebasedatabase.app/"
 #define FIREBASE_AUTH "eAx4Js7aVrc2hSwqDcmbwhLdoucxe02370UUDGjM"
 
-#define BELL 25
+#define BELL 2
 #define DHTPIN 15
 #define MAX_BAO_THUC 50
 #define DHTTYPE DHT22
@@ -39,17 +39,17 @@
 // Gia tri nao la cai dat it doi (ngay/gio he thong, do sang, thoi gian reo, wifi,
 // danh sach bao thuc) thi gian ra de giam so lan doc/ghi ma nguoi dung khong nhan ra
 // do tre vai giay.
-#define CHU_KY_CHUONG_THU_CONG_MS 500UL     // giu nguyen: bam tay can phan hoi nhanh
-#define CHU_KY_GHI_THOI_GIAN_MS 1000UL      // giu nguyen: app hien giay theo Firebase, khong duoc tre
-#define CHU_KY_DAT_NGAY_MS 800UL            // 3000 -> 800: request nho (vai truong), khong tot bang thong nhu JSON bao thuc, uu tien phan hoi nhanh khi nguoi dung bam luu
-#define CHU_KY_DAT_GIO_MS 800UL             // 3000 -> 800: tuong tu, doc nhanh de ap dung gio moi gan nhu ngay lap tuc
-#define CHU_KY_DO_SANG_MS 8000UL            // 5000 -> 8000
-#define CHU_KY_THOI_GIAN_REO_MS 8000UL      // 5000 -> 8000
-#define CHU_KY_WIFI_CAPNHAT_MS 12000UL      // 10000 -> 12000
-#define CHU_KY_QUET_WIFI_MS 3000UL          // 2000 -> 3000
-#define CHU_KY_HEARTBEAT_MS 8000UL          // 5000 -> 8000
-#define CHU_KY_DOC_BAO_THUC_MS 4000UL       // 1200 -> 4000 (JSON lon 50 bao thuc, giam manh tan suat)
-#define CHU_KY_DOC_DHT_MS 15000UL           // giu nguyen (da toi uu o Core 0 truoc do)
+#define CHU_KY_CHUONG_THU_CONG_MS 500UL // giu nguyen: bam tay can phan hoi nhanh
+#define CHU_KY_GHI_THOI_GIAN_MS 1000UL  // giu nguyen: app hien giay theo Firebase, khong duoc tre
+#define CHU_KY_DAT_NGAY_MS 800UL        // 3000 -> 800: request nho (vai truong), khong tot bang thong nhu JSON bao thuc, uu tien phan hoi nhanh khi nguoi dung bam luu
+#define CHU_KY_DAT_GIO_MS 800UL         // 3000 -> 800: tuong tu, doc nhanh de ap dung gio moi gan nhu ngay lap tuc
+#define CHU_KY_DO_SANG_MS 8000UL        // 5000 -> 8000
+#define CHU_KY_THOI_GIAN_REO_MS 8000UL  // 5000 -> 8000
+#define CHU_KY_WIFI_CAPNHAT_MS 12000UL  // 10000 -> 12000
+#define CHU_KY_QUET_WIFI_MS 3000UL      // 2000 -> 3000
+#define CHU_KY_HEARTBEAT_MS 8000UL      // 5000 -> 8000
+#define CHU_KY_DOC_BAO_THUC_MS 4000UL   // 1200 -> 4000 (JSON lon 50 bao thuc, giam manh tan suat)
+#define CHU_KY_DOC_DHT_MS 15000UL       // giu nguyen (da toi uu o Core 0 truoc do)
 
 FirebaseData Data;
 FirebaseAuth Auth;
@@ -78,6 +78,9 @@ unsigned long TimeCheckThoiGianReo = 0;
 
 bool chuongThuCongFirebase = false;
 unsigned long TimeCheckChuongThuCong = 0;
+unsigned long TimeBatDauChuongThuCong = 0; // moc thoi gian bat dau reo chuong thu cong, de tu tat sau 3 giay
+bool chuongThuCongCanTatFirebase = false;  // dang cho ghi lai trang thai tat len Firebase sau khi tu tat
+#define THOI_GIAN_REO_CHUONG_THU_CONG_MS 3000UL
 
 unsigned long TimeDocDS3231 = 0;
 unsigned long TimeDocDHT = 0;
@@ -1079,6 +1082,13 @@ void KiemTraTatChuong()
 {
   if (chuongThuCongFirebase)
   {
+    if (millis() - TimeBatDauChuongThuCong >= THOI_GIAN_REO_CHUONG_THU_CONG_MS)
+    {
+      chuongThuCongFirebase = false;
+      chuongThuCongCanTatFirebase = true; // bao cho XuLyChuongThuCongFirebase ghi lai trang thai tat len Firebase
+      digitalWrite(BELL, LOW);
+      return;
+    }
     digitalWrite(BELL, HIGH);
     return;
   }
@@ -1348,7 +1358,7 @@ void XuLyThoiGianReoFirebase()
     if (Firebase.RTDB.getInt(&Data, F("/DongHo/ThoiGianReo")))
     {
       int giay = Data.intData();
-      giay = constrain(giay, 1, 300);
+      giay = constrain(giay, 1, 30);
       static int giayTruocDo = -1;
       if (giay != giayTruocDo)
       {
@@ -1381,7 +1391,25 @@ void XuLyChuongThuCongFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckChuongThuCong >= CHU_KY_CHUONG_THU_CONG_MS || TimeCheckChuongThuCong == 0))
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return;
+
+  // Uu tien ghi lai trang thai "tat" len Firebase sau khi da tu tat sau 3 giay,
+  // de app dong bo lai toggle ve OFF. Trong luc cho ghi, KHONG doc lai gia tri cu
+  // (van con la true tren server) de tranh hieu nham thanh mot lan bam chuong moi.
+  if (chuongThuCongCanTatFirebase)
+  {
+    if (millis() - TimeCheckChuongThuCong < CHU_KY_CHUONG_THU_CONG_MS && TimeCheckChuongThuCong != 0)
+      return;
+    TimeCheckChuongThuCong = millis();
+    if (Firebase.RTDB.setBool(&Data, F("/DongHo/ChuongThuCong"), false))
+    {
+      chuongThuCongCanTatFirebase = false;
+    }
+    return;
+  }
+
+  if (millis() - TimeCheckChuongThuCong >= CHU_KY_CHUONG_THU_CONG_MS || TimeCheckChuongThuCong == 0)
   {
     TimeCheckChuongThuCong = millis();
     if (Firebase.RTDB.getBool(&Data, F("/DongHo/ChuongThuCong")))
@@ -1392,6 +1420,7 @@ void XuLyChuongThuCongFirebase()
         chuongThuCongFirebase = trangThaiMoi;
         if (chuongThuCongFirebase)
         {
+          TimeBatDauChuongThuCong = millis(); // bat dau dem 3 giay de tu tat
           digitalWrite(BELL, HIGH);
         }
         else
@@ -1607,9 +1636,9 @@ void MatrixPanel()
   }
   dmd.drawLine(0, 0, 0, 8, GRAPHICS_NORMAL);
   dmd.drawLine(0, 0, 1, 0, GRAPHICS_NORMAL);
-  dmd.drawLine(0, 8, 1, 8, GRAPHICS_NORMAL); 
+  dmd.drawLine(0, 8, 1, 8, GRAPHICS_NORMAL);
 
   dmd.drawLine(31, 0, 31, 8, GRAPHICS_NORMAL);
   dmd.drawLine(30, 0, 31, 0, GRAPHICS_NORMAL);
-  dmd.drawLine(30, 8, 31, 8, GRAPHICS_NORMAL); 
+  dmd.drawLine(30, 8, 31, 8, GRAPHICS_NORMAL);
 }
