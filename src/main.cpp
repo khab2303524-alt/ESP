@@ -149,10 +149,6 @@ void SafePrintln(const String &s)
     xSemaphoreGive(serialMutex);
 }
 
-unsigned long TimeBatDauMatKetNoi = 0;
-bool dangTheoDoiMatKetNoi = false;
-#define NGUONG_MAT_KET_NOI_MS 60000UL
-
 unsigned long TimeGuiHeartbeat = 0;
 uint32_t heartbeatCounter = 0;
 
@@ -216,45 +212,18 @@ void ThuKetNoiLaiWiFi()
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
 }
 
-// Theo doi thoi gian mat WiFi lien tuc, tu kich hoat BLE du phong neu qua lau
-void KiemTraMatKetNoiWifi()
+// Neu BLE dang bat ma WiFi da co ket noi (vi du WiFi cu tu hoi phuc qua ThuKetNoiLaiWiFi(),
+// khong nhat thiet phai doi WiFi qua BLE) thi tat BLE va kich hoat Firebase luon,
+// khong can theo doi/timeout gi ca.
+void KiemTraTatBLEKhiCoWifi()
 {
-  if (WiFi.status() == WL_CONNECTED)
+  if (bleDangPhat && WiFi.status() == WL_CONNECTED)
   {
-    dangTheoDoiMatKetNoi = false;
-
-    // nếu BLE đang bật thì tắt luôn
-    if (bleDangPhat && WiFi.status() == WL_CONNECTED)
+    if (!firebaseDaKhoiTao)
     {
-      Serial.println("[WiFi] Da hoi phuc, cho on dinh truoc khi tat BLE");
-
-      delay(3000);
-
-      if (WiFi.status() == WL_CONNECTED)
-      {
-        TatBLEMode();
-      }
+      KichHoatCauHinhFirebase();
     }
-
-    if (yeuCauDoiWifi || taskDoiWifiDangChay || dangQuetWifi)
-    {
-      dangTheoDoiMatKetNoi = false;
-      return;
-    }
-
-    if (!dangTheoDoiMatKetNoi)
-    {
-      dangTheoDoiMatKetNoi = true;
-      TimeBatDauMatKetNoi = millis();
-    }
-    else if (!bleDangPhat && millis() - TimeBatDauMatKetNoi >= NGUONG_MAT_KET_NOI_MS)
-    {
-      Serial.println("[WiFi] Mat ket noi qua lau, se bat BLE...");
-
-      vTaskDelay(pdMS_TO_TICKS(3000));
-
-      BatBLEMode();
-    }
+    TatBLEMode();
   }
 }
 
@@ -856,7 +825,7 @@ void loop()
 {
   XuLyDoiWifiTuBLE();
   ThuKetNoiLaiWiFi();
-  KiemTraMatKetNoiWifi();
+  KiemTraTatBLEKhiCoWifi();
   KiemTraLaiRTC();
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
   BaoThuc(now);
