@@ -1328,11 +1328,16 @@ void TaskKhoiTaoNgatCore0(void *ThamSo)
 {
   // ── FIX: dời task quét LED + timer sang Core 1, tranh xa Core 0 (noi WiFi/BLE stack
   // dang chay), de khong bi tranh chap CPU gay giat/nhap nhay man hinh o tan so thap ──
-  xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, configMAX_PRIORITIES - 1, &hTaskScanLED, 1);
+  // FIX WDT: ha priority xuong 5 (thay vi configMAX_PRIORITIES-1) de Idle Task cua
+  // Core 1 chac chan duoc cap CPU dinh ky, tranh Interrupt WDT timeout khi
+  // scanDisplayBySPI() chiem gan het chu ky ngat.
+  xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, 5, &hTaskScanLED, 1);
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
-  timerAlarmWrite(timer, 300, true);
+  // FIX WDT: tang chu ky ngat tu 300us -> 800us. 300us qua day cho scanDisplayBySPI(),
+  // khien task quet LED gan nhu khong bao gio nhuong duoc CPU khi chay o priority cao.
+  timerAlarmWrite(timer, 800, true);
   timerAlarmEnable(timer);
   vTaskDelete(NULL);
 }
