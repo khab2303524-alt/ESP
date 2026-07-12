@@ -33,6 +33,24 @@
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
+// ===== TOI UU CHU KY FIREBASE =====
+// Nguyen tac: gia tri nao anh huong truc tiep den trai nghiem "song" (dong ho hien
+// giay theo Firebase, chuong bam tay) thi GIU NGUYEN de khong lam cham cam nhan.
+// Gia tri nao la cai dat it doi (ngay/gio he thong, do sang, thoi gian reo, wifi,
+// danh sach bao thuc) thi gian ra de giam so lan doc/ghi ma nguoi dung khong nhan ra
+// do tre vai giay.
+#define CHU_KY_CHUONG_THU_CONG_MS 500UL     // giu nguyen: bam tay can phan hoi nhanh
+#define CHU_KY_GHI_THOI_GIAN_MS 1000UL      // giu nguyen: app hien giay theo Firebase, khong duoc tre
+#define CHU_KY_DAT_NGAY_MS 800UL            // 3000 -> 800: request nho (vai truong), khong tot bang thong nhu JSON bao thuc, uu tien phan hoi nhanh khi nguoi dung bam luu
+#define CHU_KY_DAT_GIO_MS 800UL             // 3000 -> 800: tuong tu, doc nhanh de ap dung gio moi gan nhu ngay lap tuc
+#define CHU_KY_DO_SANG_MS 8000UL            // 5000 -> 8000
+#define CHU_KY_THOI_GIAN_REO_MS 8000UL      // 5000 -> 8000
+#define CHU_KY_WIFI_CAPNHAT_MS 12000UL      // 10000 -> 12000
+#define CHU_KY_QUET_WIFI_MS 3000UL          // 2000 -> 3000
+#define CHU_KY_HEARTBEAT_MS 8000UL          // 5000 -> 8000
+#define CHU_KY_DOC_BAO_THUC_MS 4000UL       // 1200 -> 4000 (JSON lon 50 bao thuc, giam manh tan suat)
+#define CHU_KY_DOC_DHT_MS 15000UL           // giu nguyen (da toi uu o Core 0 truoc do)
+
 FirebaseData Data;
 FirebaseAuth Auth;
 FirebaseConfig Config;
@@ -172,6 +190,7 @@ void TatBLEMode();
 void XuLyChuongThuCongFirebase();
 void TaskMatrixPanel(void *param);
 void TaskDocBaoThucFirebase(void *param);
+void TaskDocDHT(void *param);
 
 // Theo doi thoi gian mat WiFi lien tuc, tu kich hoat BLE du phong neu qua lau
 void KiemTraMatKetNoiWifi()
@@ -212,7 +231,7 @@ void GuiHeartbeatFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return;
-  if (millis() - TimeGuiHeartbeat < 5000 && TimeGuiHeartbeat != 0)
+  if (millis() - TimeGuiHeartbeat < CHU_KY_HEARTBEAT_MS && TimeGuiHeartbeat != 0)
     return;
   TimeGuiHeartbeat = millis();
   heartbeatCounter++;
@@ -476,7 +495,7 @@ void XuLyWifiFirebase()
 
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0)
+  if (millis() - TimeCheckWifi < CHU_KY_WIFI_CAPNHAT_MS && TimeCheckWifi != 0)
     return;
   TimeCheckWifi = millis();
 
@@ -632,7 +651,7 @@ void XuLyQuetWifiFirebase()
 
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (millis() - TimeCheckQuetWifi < 2000 && TimeCheckQuetWifi != 0)
+  if (millis() - TimeCheckQuetWifi < CHU_KY_QUET_WIFI_MS && TimeCheckQuetWifi != 0)
     return;
   TimeCheckQuetWifi = millis();
 
@@ -745,6 +764,9 @@ void setup()
 
   xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
+  // FIX FLICKER: TaskDocDHT chay o Core 0 de noInterrupts() ben trong thu vien DHT
+  // khong lam gian doan timer quet LED (dang o Core 1).
+  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 4096, NULL, 1, NULL, 0);
 }
 
 void loop()
@@ -756,7 +778,12 @@ void loop()
   BaoThuc(now);
   KiemTraTatChuong();
   DongHo(now);
-  CamBienDHT();
+  // FIX: CamBienDHT() da duoc chuyen sang TaskDocDHT chay tren Core 0.
+  // Ly do: dht.readTemperature()/readHumidity() dung noInterrupts() de bit-bang
+  // doc xung cam bien (~4-5ms). Tren ESP32, noInterrupts() chi khoa ngat tren
+  // dung core dang chay ham do. Neu goi ngay trong loop() (Core 1, cung core voi
+  // TaskScanLED va timer ngat quet LED) thi moi 15 giay se lam ngat quet LED bi
+  // chan mat vai chu ky -> man hinh nhap nhay ngau nhien, khong lien quan hanh dong nao.
 
   static uint8_t buocFirebase = 0;
   switch (buocFirebase)
@@ -826,6 +853,18 @@ void TaskMatrixPanel(void *param)
   {
     MatrixPanel();
     vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// FIX FLICKER: doc DHT tren Core 0, tach khoi Core 1 (noi TaskScanLED va timer
+// quet LED dang chay). CamBienDHT() tu gioi han chu ky doc that su la 15s ben trong,
+// task nay chi can chay thuong xuyen de kiem tra dieu kien do.
+void TaskDocDHT(void *param)
+{
+  for (;;)
+  {
+    CamBienDHT();
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -972,7 +1011,7 @@ void DongHo(DateTime now)
     Giay = now.second();
     return;
   }
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeDocDS3231 >= 1000 || TimeDocDS3231 == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeDocDS3231 >= CHU_KY_GHI_THOI_GIAN_MS || TimeDocDS3231 == 0))
   {
     TimeDocDS3231 = millis();
     static bool daGhiWifi = false;
@@ -1078,16 +1117,18 @@ void KiemTraTatChuong()
   }
 }
 
+#define NHIET_DO_OFFSET 2.0f
+
 void CamBienDHT()
 {
   if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 30000UL))
   {
     dhtDaOnDinh = true;
   }
-  if (millis() - TimeDocDHT > 15000 || TimeDocDHT == 0)
+  if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
   {
     TimeDocDHT = millis();
-    float temp = dht.readTemperature();
+    float temp = dht.readTemperature() - NHIET_DO_OFFSET;
     float humi = dht.readHumidity();
     if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
     {
@@ -1104,9 +1145,6 @@ void CamBienDHT()
   }
 }
 
-// Chi con xu ly dong bo NGUOC len Firebase (khi bao thuc mot-lan tu tat cuc bo
-// nhung lan ghi truoc do that bai). Phan DOC bao thuc tu Firebase ve da chuyen
-// sang TaskDocBaoThucFirebase() de khong bi rang buoc boi nhip cua loop() state machine.
 void XuLyDocBaoThucFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
@@ -1141,15 +1179,12 @@ void XuLyDocBaoThucFirebase()
     baoThucCanDongBoFirebase = false;
 }
 
-// Task rieng: doc /DongHo/dsBaoThuc tu Firebase ve dinh ky, nhanh hon nhieu so voi
-// truoc (7000ms) ma khong lam nghen loop()/cac buoc Firebase khac vi chay tren task
-// va FirebaseData rieng (baoThucData), khong dung chung &Data voi loop().
 void TaskDocBaoThucFirebase(void *param)
 {
   FirebaseData baoThucData;
   baoThucData.setBSSLBufferSize(4096, 1024);
 
-  const TickType_t KHOANG_NGHI = pdMS_TO_TICKS(1200); // ~1.2s, nhanh hon 7s truoc do
+  const TickType_t KHOANG_NGHI = pdMS_TO_TICKS(CHU_KY_DOC_BAO_THUC_MS);
 
   for (;;)
   {
@@ -1222,7 +1257,7 @@ void XuLyDatNgayFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi || !rtcOk)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatNgay > 2000 || TimeCheckDatNgay == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatNgay > CHU_KY_DAT_NGAY_MS || TimeCheckDatNgay == 0))
   {
     TimeCheckDatNgay = millis();
     if (Firebase.RTDB.getJSON(&Data, F("/DongHo/DatNgay")))
@@ -1254,7 +1289,7 @@ void XuLyDatGioFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi || !rtcOk)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatGio > 2000 || TimeCheckDatGio == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatGio > CHU_KY_DAT_GIO_MS || TimeCheckDatGio == 0))
   {
     TimeCheckDatGio = millis();
     if (Firebase.RTDB.getJSON(&Data, F("/DongHo/DatGio")))
@@ -1286,7 +1321,7 @@ void XuLyDoSangFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > 5000 || TimeCheckDoSang == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > CHU_KY_DO_SANG_MS || TimeCheckDoSang == 0))
   {
     TimeCheckDoSang = millis();
     if (Firebase.RTDB.getInt(&Data, F("/DongHo/DoSang")))
@@ -1307,7 +1342,7 @@ void XuLyThoiGianReoFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckThoiGianReo > 5000 || TimeCheckThoiGianReo == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckThoiGianReo > CHU_KY_THOI_GIAN_REO_MS || TimeCheckThoiGianReo == 0))
   {
     TimeCheckThoiGianReo = millis();
     if (Firebase.RTDB.getInt(&Data, F("/DongHo/ThoiGianReo")))
@@ -1346,7 +1381,7 @@ void XuLyChuongThuCongFirebase()
 {
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckChuongThuCong >= 500 || TimeCheckChuongThuCong == 0))
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckChuongThuCong >= CHU_KY_CHUONG_THU_CONG_MS || TimeCheckChuongThuCong == 0))
   {
     TimeCheckChuongThuCong = millis();
     if (Firebase.RTDB.getBool(&Data, F("/DongHo/ChuongThuCong")))
@@ -1408,6 +1443,17 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
   return trangThaiGanNhat;
 }
 
+void veHaiCham(int x, int y, byte style)
+{
+  for (int dx = 0; dx < 2; dx++)
+  {
+    dmd.writePixel(x + dx, y + 1, style, 1);
+    dmd.writePixel(x + dx, y + 2, style, 1);
+    dmd.writePixel(x + dx, y + 4, style, 1);
+    dmd.writePixel(x + dx, y + 5, style, 1);
+  }
+}
+
 void MatrixPanel()
 {
   DateTime now = DateTime(2020, 1, 1, Gio, Phut, Giay);
@@ -1434,11 +1480,11 @@ void MatrixPanel()
     dmd.selectFont(System5x7);
     if (dauHaiChamHien)
     {
-      dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
+      veHaiCham(15, 1, GRAPHICS_NORMAL);
     }
     else
     {
-      dmd.drawFilledBox(14, 2, 16, 6, GRAPHICS_INVERSE);
+      dmd.drawFilledBox(15, 2, 16, 6, GRAPHICS_INVERSE);
     }
     if (!dhtDaOnDinh)
     {
@@ -1495,8 +1541,8 @@ void MatrixPanel()
     nhietDoTruocDo = NhietDo;
     doAmTruocDo = DoAm;
     trangThaiBaoThucTruocDo = trangThaiBaoThuc;
-    dmd.drawFilledBox(2, 2, 13, 7, GRAPHICS_INVERSE);
-    dmd.drawFilledBox(16, 2, 30, 7, GRAPHICS_INVERSE);
+    dmd.drawFilledBox(3, 2, 14, 7, GRAPHICS_INVERSE);
+    dmd.drawFilledBox(17, 2, 29, 7, GRAPHICS_INVERSE);
     dmd.drawFilledBox(0, 9, 31, 15, GRAPHICS_INVERSE);
 
     dmd.selectFont(System5x7);
@@ -1504,11 +1550,11 @@ void MatrixPanel()
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
-    dmd.drawString(2, 1, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(19, 1, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(3, 1, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(18, 1, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
-      dmd.drawChar(14, 1, ':', GRAPHICS_NORMAL);
+      veHaiCham(15, 1, GRAPHICS_NORMAL);
 
     if (dhtDaOnDinh)
     {
@@ -1559,5 +1605,11 @@ void MatrixPanel()
       dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
     }
   }
-  dmd.drawBox(0, 0, 31, 8, GRAPHICS_NORMAL);
+  dmd.drawLine(0, 0, 0, 8, GRAPHICS_NORMAL);
+  dmd.drawLine(0, 0, 1, 0, GRAPHICS_NORMAL);
+  dmd.drawLine(0, 8, 1, 8, GRAPHICS_NORMAL); 
+
+  dmd.drawLine(31, 0, 31, 8, GRAPHICS_NORMAL);
+  dmd.drawLine(30, 0, 31, 0, GRAPHICS_NORMAL);
+  dmd.drawLine(30, 8, 31, 8, GRAPHICS_NORMAL); 
 }
