@@ -29,22 +29,21 @@
 #define DISPLAYS_ACROSS 1
 #define DISPLAYS_DOWN 1
 
-// Cấu hình các UUID định danh Bluetooth BLE
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-#define CHU_KY_CHUONG_THU_CONG_MS 500UL // giu nguyen: bam tay can phan hoi nhanh
-#define CHU_KY_GHI_THOI_GIAN_MS 1000UL  // giu nguyen: app hien giay theo Firebase, khong duoc tre
-#define CHU_KY_DAT_NGAY_MS 800UL        // 3000 -> 800: request nho (vai truong), khong tot bang thong nhu JSON bao thuc, uu tien phan hoi nhanh khi nguoi dung bam luu
-#define CHU_KY_DAT_GIO_MS 800UL         // 3000 -> 800: tuong tu, doc nhanh de ap dung gio moi gan nhu ngay lap tuc
-#define CHU_KY_DO_SANG_MS 8000UL        // 5000 -> 8000
-#define CHU_KY_THOI_GIAN_REO_MS 8000UL  // 5000 -> 8000
-#define CHU_KY_WIFI_CAPNHAT_MS 12000UL  // 10000 -> 12000
-#define CHU_KY_QUET_WIFI_MS 3000UL      // 2000 -> 3000
-#define CHU_KY_HEARTBEAT_MS 8000UL      // 5000 -> 8000
-#define CHU_KY_DOC_BAO_THUC_MS 4000UL   // 1200 -> 4000 (JSON lon 50 bao thuc, giam manh tan suat)
+#define CHU_KY_CHUONG_THU_CONG_MS 500UL
+#define CHU_KY_GHI_THOI_GIAN_MS 1000UL
+#define CHU_KY_DAT_NGAY_MS 800UL
+#define CHU_KY_DAT_GIO_MS 800UL
+#define CHU_KY_DO_SANG_MS 8000UL
+#define CHU_KY_THOI_GIAN_REO_MS 8000UL
+#define CHU_KY_WIFI_CAPNHAT_MS 12000UL
+#define CHU_KY_QUET_WIFI_MS 3000UL
+#define CHU_KY_HEARTBEAT_MS 800UL
+#define CHU_KY_DOC_BAO_THUC_MS 4000UL
 #define CHU_KY_DOC_DHT_MS 15000UL
-#define CHU_KY_THU_LAI_WIFI 10000UL // 10 giây    // giu nguyen (da toi uu o Core 0 truoc do)
+#define CHU_KY_THU_LAI_WIFI 10000UL
 
 unsigned long lastRetryWiFi = 0;
 
@@ -75,8 +74,8 @@ unsigned long TimeCheckThoiGianReo = 0;
 
 bool chuongThuCongFirebase = false;
 unsigned long TimeCheckChuongThuCong = 0;
-unsigned long TimeBatDauChuongThuCong = 0; // moc thoi gian bat dau reo chuong thu cong, de tu tat sau 3 giay
-bool chuongThuCongCanTatFirebase = false;  // dang cho ghi lai trang thai tat len Firebase sau khi tu tat
+unsigned long TimeBatDauChuongThuCong = 0;
+bool chuongThuCongCanTatFirebase = false;
 #define THOI_GIAN_REO_CHUONG_THU_CONG_MS 3000UL
 
 unsigned long TimeDocDS3231 = 0;
@@ -125,7 +124,7 @@ unsigned long TimeCheckQuetWifi = 0;
 TaskHandle_t hTaskScanLED = NULL;
 volatile bool canScan = false;
 SemaphoreHandle_t serialMutex = NULL;
-SemaphoreHandle_t baoThucMutex = NULL; // bao ve mang dsbaothuc[]/thuMaskBaoThuc[] khoi truy cap dong thoi
+SemaphoreHandle_t baoThucMutex = NULL;
 bool taskDocBaoThucDaTao = false;
 
 BLECharacteristic *pCharacteristic;
@@ -149,14 +148,8 @@ void SafePrintln(const String &s)
     xSemaphoreGive(serialMutex);
 }
 
-unsigned long TimeBatDauMatKetNoi = 0;
-bool dangTheoDoiMatKetNoi = false;
-#define NGUONG_MAT_KET_NOI_MS 60000UL
-
 unsigned long TimeGuiHeartbeat = 0;
 uint32_t heartbeatCounter = 0;
-
-bool daTungKetNoiWiFi = false;
 
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
@@ -213,58 +206,45 @@ void ThuKetNoiLaiWiFi()
   Serial.println("[WiFi] Thu ket noi lai...");
 
   WiFi.disconnect();
-  delay(200);
-
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("[WiFi] Reconnect OK");
 
-    if (bleDangPhat)
-    {
-      TatBLEMode();
-    }
-  }
 }
+
+unsigned long TimeChoOnDinhTruocKhiTatBLE = 0;
+bool dangChoOnDinhTruocKhiTatBLE = false;
 
 void KiemTraMatKetNoiWifi()
 {
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    dangTheoDoiMatKetNoi = false;
 
-    // nếu BLE đang bật thì tắt
-    if (bleDangPhat)
+  if (WiFi.status() == WL_CONNECTED && bleDangPhat)
+  {
+    if (!dangChoOnDinhTruocKhiTatBLE)
     {
-      Serial.println("[WiFi] Da hoi phuc, tat BLE...");
-      delay(3000);
+      dangChoOnDinhTruocKhiTatBLE = true;
+      TimeChoOnDinhTruocKhiTatBLE = millis();
+      Serial.println("[WiFi] Da hoi phuc, cho on dinh truoc khi tat BLE...");
+    }
+    else if (millis() - TimeChoOnDinhTruocKhiTatBLE >= 3000)
+    {
       if (WiFi.status() == WL_CONNECTED)
       {
         TatBLEMode();
+
+        if (WiFi.status() != WL_CONNECTED)
+        {
+          Serial.println("[WiFi] Bi rot ngay sau khi tat BLE, thu ket noi lai ngay...");
+          lastRetryWiFi = 0;
+        }
       }
+      dangChoOnDinhTruocKhiTatBLE = false;
     }
-
-    return;
   }
-
-  if (daTungKetNoiWiFi)
+  else
   {
-    return;
-  }
-
-  if (!dangTheoDoiMatKetNoi)
-  {
-    dangTheoDoiMatKetNoi = true;
-    TimeBatDauMatKetNoi = millis();
-  }
-  else if (!bleDangPhat && millis() - TimeBatDauMatKetNoi >= NGUONG_MAT_KET_NOI_MS)
-  {
-    Serial.println("[WiFi] Lan dau khong ket noi duoc, bat BLE...");
-    BatBLEMode();
+    dangChoOnDinhTruocKhiTatBLE = false;
   }
 }
 
-// Gui "nhip tim" len Firebase de app phat hien mat ket noi
 void GuiHeartbeatFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready())
@@ -275,7 +255,7 @@ void GuiHeartbeatFirebase()
   heartbeatCounter++;
   Firebase.RTDB.setInt(&Data, F("/DongHo/Heartbeat"), heartbeatCounter);
 }
-// Đọc SSID/mật khẩu WiFi đã lưu trong flash
+
 void DocWifiTuFlash()
 {
   preferences.begin("WiFiCfg", true);
@@ -297,7 +277,6 @@ void DocWifiTuFlash()
   }
 }
 
-// Xoá thông tin WiFi đã lưu trong flash
 void XoaWifiFlash()
 {
   preferences.begin("WiFiCfg", false);
@@ -307,7 +286,6 @@ void XoaWifiFlash()
   Serial.println("[Flash] Da xoa WiFi trong flash");
 }
 
-// Xử lý nhận dữ liệu cấu hình Wi-Fi truyền từ App qua kết nối Bluetooth BLE
 class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
 {
   void onWrite(BLECharacteristic *pChar)
@@ -336,7 +314,7 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
     }
   }
 };
-// Bật chế độ Bluetooth Server dự phòng khi không kết nối được vào mạng cũ
+
 void BatBLEMode()
 {
   if (bleDangPhat || bleDangTat)
@@ -404,7 +382,6 @@ void TatBLEMode()
 
 unsigned long TimeCheckWifi = 0;
 
-// Task đổi sang WiFi mới theo yêu cầu từ app/Firebase/Bluetooth
 void TaskDoiWifi(void *param)
 {
   String newSsid = pendingSsid;
@@ -443,7 +420,11 @@ void TaskDoiWifi(void *param)
     Serial.printf("\n[WiFi-Task] Thanh cong: %s\n", newSsid.c_str());
     Serial.printf("[WiFi] SSID hien tai: %s\n", WiFi.SSID().c_str());
 
-    // Nếu kết nối đến từ BLE (lúc mất mạng), Firebase chưa từng được kích hoạt -> kích hoạt ngay
+    if (bleDangPhat)
+    {
+      TatBLEMode();
+    }
+
     if (!firebaseDaKhoiTao)
     {
       KichHoatCauHinhFirebase();
@@ -471,7 +452,7 @@ void TaskDoiWifi(void *param)
     }
 
     if (hTaskScanLED != NULL)
-      vTaskSuspend(hTaskScanLED); // tam dung quet LED trong luc ghi flash de tranh giat hinh
+      vTaskSuspend(hTaskScanLED);
 
     preferences.begin("WiFiCfg", false);
     preferences.putString("ssid", newSsid);
@@ -512,11 +493,9 @@ void TaskDoiWifi(void *param)
     WiFi.setAutoReconnect(true);
     TimeCheckWifi = millis();
 
-    // Nếu kết nối Wi-Fi mới thất bại mà Wi-Fi cũ cũng chết, tiếp tục duy trì BLE
     if (WiFi.status() != WL_CONNECTED)
     {
-      // bleDangPhat van con true (chi advertising bi stop o tren), nen goi lai
-      // startAdvertising() truc tiep thay vi BatBLEMode() (se no-op vi da "dang phat").
+
       if (bleDangPhat)
       {
         BLEDevice::startAdvertising();
@@ -534,8 +513,6 @@ void TaskDoiWifi(void *param)
   vTaskDelete(NULL);
 }
 
-// Kích hoạt TaskDoiWifi khi có yêu cầu đổi WiFi đến từ BLE (không phụ thuộc Firebase,
-// vì lúc BLE đang hoạt động Firebase thường CHƯA được khởi tạo)
 void XuLyDoiWifiTuBLE()
 {
   if (yeuCauDoiWifi && !taskDoiWifiDangChay)
@@ -545,7 +522,6 @@ void XuLyDoiWifiTuBLE()
   }
 }
 
-// Kiểm tra Firebase xem có yêu cầu đổi WiFi không
 void XuLyWifiFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready())
@@ -582,10 +558,8 @@ void XuLyWifiFirebase()
   pendingSsid = newSsid;
   pendingPass = newPass;
   yeuCauDoiWifi = true;
-  taskDoiWifiDangChay = true; // đánh dấu để XuLyDoiWifiTuBLE() không tạo task trùng lặp
+  taskDoiWifiDangChay = true;
 
-  // Cung ly do voi TaskQuetWifi: ham nay goi Firebase HTTPS nhieu lan lien tiep
-  // (trangThai co retry + ssidHienTai), tang stack de tranh tran nhu TaskQuetWifi.
   xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifi", 20480, NULL, 1, NULL, 1);
 }
 
@@ -616,7 +590,6 @@ String SanitizeSsid(const String &s)
   return out;
 }
 
-// Task quét danh sách WiFi xung quanh
 void TaskQuetWifi(void *param)
 {
   Serial.println("[WiFi-Scan] Bat dau quet mang WiFi lan can...");
@@ -689,10 +662,7 @@ void TaskQuetWifi(void *param)
 
   if (Firebase.ready())
   {
-    // Dung 2 FirebaseData rieng cho 2 request: neu dung chung 1 object, khi
-    // request dau (setArray) that bai, session/buffer cua object do co the
-    // bi "dinh" trang thai loi, khien request sau (setBool) cung bao loi
-    // an theo kieu "No data supplied" du ban than no khong lien quan.
+
     FirebaseData scanData;
     scanData.setBSSLBufferSize(4096, 4096);
 
@@ -712,8 +682,6 @@ void TaskQuetWifi(void *param)
       Serial.println("[Firebase] Da ghi /WiFi/danhSachWifi thanh cong!");
     }
 
-    // Chi bao "xong" cho app sau khi da thu ghi (thanh cong hoac het luot retry),
-    // tranh truong hop app thay quetLuoi=false ma Firebase chua co du lieu moi.
     FirebaseData flagData;
     flagData.setBSSLBufferSize(2048, 1024);
     bool okFlag = Firebase.RTDB.setBool(&flagData, F("/WiFi/quetLuoi"), false);
@@ -749,10 +717,7 @@ void XuLyQuetWifiFirebase()
     return;
 
   dangQuetWifi = true;
-  // 8192 byte la khong du: moi lan goi HTTPS/TLS toi Firebase (mbedTLS
-  // handshake) co the ton 4-6KB stack, ma ham nay goi HTTPS 2 LAN LIEN TIEP
-  // (setArray + setBool) cong voi cac bien cuc bo (String[20], FirebaseJsonArray)
-  // => tran stack, crash "stack overflow in task TaskQuetWifi". Tang len 20480.
+
   xTaskCreatePinnedToCore(TaskQuetWifi, "TaskQuetWifi", 20480, NULL, 1, NULL, 1);
 }
 
@@ -796,7 +761,6 @@ void KiemTraLaiRTC()
   }
 }
 
-// Task kết nối mạng khi khởi động, nếu thất bại tự kích hoạt BLE cấu hình
 void TaskKetNoiWifiBanDau(void *param)
 {
   WiFi.mode(WIFI_STA);
@@ -815,7 +779,6 @@ void TaskKetNoiWifiBanDau(void *param)
   {
     Serial.println("\n[WiFi] Da ket noi WiFi thanh cong!");
     WiFi.setAutoReconnect(true);
-    daTungKetNoiWiFi = true;
     KichHoatCauHinhFirebase();
   }
   else
@@ -854,8 +817,7 @@ void setup()
 
   xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
-  // FIX FLICKER: TaskDocDHT chay o Core 0 de noInterrupts() ben trong thu vien DHT
-  // khong lam gian doan timer quet LED (dang o Core 1).
+
   xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 0);
 }
 
@@ -865,16 +827,16 @@ void loop()
   ThuKetNoiLaiWiFi();
   KiemTraMatKetNoiWifi();
   KiemTraLaiRTC();
+
+  if (WiFi.status() == WL_CONNECTED && !firebaseDaKhoiTao && !yeuCauDoiWifi && !dangQuetWifi && !bleDangPhat && !bleDangTat)
+  {
+    KichHoatCauHinhFirebase();
+  }
+
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
   BaoThuc(now);
   KiemTraTatChuong();
   DongHo(now);
-  // FIX: CamBienDHT() da duoc chuyen sang TaskDocDHT chay tren Core 0.
-  // Ly do: dht.readTemperature()/readHumidity() dung noInterrupts() de bit-bang
-  // doc xung cam bien (~4-5ms). Tren ESP32, noInterrupts() chi khoa ngat tren
-  // dung core dang chay ham do. Neu goi ngay trong loop() (Core 1, cung core voi
-  // TaskScanLED va timer ngat quet LED) thi moi 15 giay se lam ngat quet LED bi
-  // chan mat vai chu ky -> man hinh nhap nhay ngau nhien, khong lien quan hanh dong nao.
 
   static uint8_t buocFirebase = 0;
   switch (buocFirebase)
@@ -961,26 +923,30 @@ void TaskDocDHT(void *param)
       dhtDaOnDinh = true;
       Serial.println("[DHT] Da on dinh");
     }
-    if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
+    if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
     {
-      if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
+      TimeDocDHT = millis();
+
+      float temp = dht.readTemperature() - NHIET_DO_OFFSET;
+      float humi = dht.readHumidity();
+
+      if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
       {
-        TimeDocDHT = millis();
+        NhietDo = (int8_t)temp;
+        DoAm = (uint8_t)humi;
 
-        float temp = dht.readTemperature() - NHIET_DO_OFFSET;
-        float humi = dht.readHumidity();
-
-        if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
+        if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
         {
           FirebaseJson json;
           json.set("NhietDo", temp);
           json.set("DoAm", humi);
 
           Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json);
-
-          NhietDo = (int8_t)temp;
-          DoAm = (uint8_t)humi;
         }
+      }
+      else
+      {
+        Serial.println("[DHT] Doc that bai (NaN)");
       }
     }
 
@@ -1165,7 +1131,7 @@ void BaoThuc(DateTime now)
     return;
   }
   if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(50)) != pdTRUE)
-    return; // task doc Firebase dang ghi, bo qua vong nay, thu lai vong sau (BaoThuc goi lien tuc trong loop)
+    return;
 
   for (uint8_t i = 0; i < MAX_BAO_THUC; i++)
   {
@@ -1200,7 +1166,7 @@ void KiemTraTatChuong()
     if (millis() - TimeBatDauChuongThuCong >= THOI_GIAN_REO_CHUONG_THU_CONG_MS)
     {
       chuongThuCongFirebase = false;
-      chuongThuCongCanTatFirebase = true; // bao cho XuLyChuongThuCongFirebase ghi lai trang thai tat len Firebase
+      chuongThuCongCanTatFirebase = true;
       digitalWrite(BELL, LOW);
       return;
     }
@@ -1297,7 +1263,7 @@ void XuLyDocBaoThucFirebase()
   }
   else
   {
-    conLoiSot = true; // khong lay duoc mutex, thu lai lan sau
+    conLoiSot = true;
   }
 
   if (!conLoiSot)
@@ -1486,17 +1452,12 @@ void XuLyThoiGianReoFirebase()
 
 void TaskKhoiTaoNgatCore0(void *ThamSo)
 {
-  // ── FIX: dời task quét LED + timer sang Core 1, tranh xa Core 0 (noi WiFi/BLE stack
-  // dang chay), de khong bi tranh chap CPU gay giat/nhap nhay man hinh o tan so thap ──
-  // FIX WDT: ha priority xuong 5 (thay vi configMAX_PRIORITIES-1) de Idle Task cua
-  // Core 1 chac chan duoc cap CPU dinh ky, tranh Interrupt WDT timeout khi
-  // scanDisplayBySPI() chiem gan het chu ky ngat.
+
   xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, 5, &hTaskScanLED, 1);
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
-  // FIX WDT: tang chu ky ngat tu 300us -> 800us. 300us qua day cho scanDisplayBySPI(),
-  // khien task quet LED gan nhu khong bao gio nhuong duoc CPU khi chay o priority cao.
+
   timerAlarmWrite(timer, 800, true);
   timerAlarmEnable(timer);
   vTaskDelete(NULL);
@@ -1509,9 +1470,6 @@ void XuLyChuongThuCongFirebase()
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return;
 
-  // Uu tien ghi lai trang thai "tat" len Firebase sau khi da tu tat sau 3 giay,
-  // de app dong bo lai toggle ve OFF. Trong luc cho ghi, KHONG doc lai gia tri cu
-  // (van con la true tren server) de tranh hieu nham thanh mot lan bam chuong moi.
   if (chuongThuCongCanTatFirebase)
   {
     if (millis() - TimeCheckChuongThuCong < CHU_KY_CHUONG_THU_CONG_MS && TimeCheckChuongThuCong != 0)
@@ -1535,7 +1493,7 @@ void XuLyChuongThuCongFirebase()
         chuongThuCongFirebase = trangThaiMoi;
         if (chuongThuCongFirebase)
         {
-          TimeBatDauChuongThuCong = millis(); // bat dau dem 3 giay de tu tat
+          TimeBatDauChuongThuCong = millis();
           digitalWrite(BELL, HIGH);
         }
         else
@@ -1551,13 +1509,13 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
 {
   if (!rtcOk)
     return 0;
-  static uint8_t trangThaiGanNhat = 0; // fallback khi khong lay duoc mutex, tranh nhay icon sai trong 1 khung hinh
+  static uint8_t trangThaiGanNhat = 0;
   bool coBaoThucBat = false;
   bool sapReoTrong10Phut = false;
   uint32_t phutHienTai = now.hour() * 60 + now.minute();
 
   if (xSemaphoreTake(baoThucMutex, pdMS_TO_TICKS(20)) != pdTRUE)
-    return trangThaiGanNhat; // task doc Firebase dang ghi; giu nguyen icon cu, khong glitch
+    return trangThaiGanNhat;
 
   for (int i = 0; i < MAX_BAO_THUC; i++)
   {
