@@ -130,6 +130,8 @@ bool taskDocBaoThucDaTao = false;
 BLECharacteristic *pCharacteristic;
 bool bleDangPhat = false;
 
+volatile bool docDHT = false;
+
 void SafePrint(const String &s)
 {
   if (serialMutex != NULL)
@@ -169,7 +171,7 @@ void LuuBaoThucVaoFlash();
 bool DongBoBaoThucLenFirebase();
 uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu);
 bool LaBaoThucMotLan(uint8_t index);
-void TaskKhoiTaoNgatCore0(void *ThamSo);
+void TaskKhoiTaoNgatCore(void *ThamSo);
 void DocWifiTuFlash();
 void GhiWifiHienTaiLenFirebase();
 void XuLyWifiFirebase();
@@ -742,7 +744,7 @@ void KhoiTaoManHinhLED()
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
 
-  xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore0, "InitScanLED", 2048, NULL, configMAX_PRIORITIES, NULL, 1);
+  xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore, "InitScanLED", 2048, NULL, configMAX_PRIORITIES, NULL, 1);
 }
 
 void KiemTraLaiRTC()
@@ -817,7 +819,7 @@ void setup()
   xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
 
-  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 1);
 }
 
 void loop()
@@ -884,9 +886,14 @@ void loop()
 
 void IRAM_ATTR triggerScan()
 {
+  if (docDHT)
+    return;
+
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  if (hTaskScanLED != NULL)
+
+  if (hTaskScanLED)
     vTaskNotifyGiveFromISR(hTaskScanLED, &xHigherPriorityTaskWoken);
+
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -922,30 +929,45 @@ void TaskDocDHT(void *param)
       dhtDaOnDinh = true;
       Serial.println("[DHT] Da on dinh");
     }
+
     if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
     {
       TimeDocDHT = millis();
 
-      float temp = dht.readTemperature() - NHIET_DO_OFFSET;
-      float humi = dht.readHumidity();
-
-      if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
+      if (!dhtDaOnDinh)
       {
-        NhietDo = (int8_t)temp;
-        DoAm = (uint8_t)humi;
-
-        if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
-        {
-          FirebaseJson json;
-          json.set("NhietDo", temp);
-          json.set("DoAm", humi);
-
-          Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json);
-        }
+        Serial.println("[DHT] Cho on dinh truoc khi doc du lieu, bo qua lan nay");
       }
       else
       {
-        Serial.println("[DHT] Doc that bai (NaN)");
+        docDHT = true;
+
+        float temp = dht.readTemperature() - NHIET_DO_OFFSET;
+        float humi = dht.readHumidity();
+
+        docDHT = false;
+
+        if (isnan(temp) || isnan(humi))
+        {
+          Serial.println("[DHT] Doc that bai (NaN)");
+        }
+        else
+        {
+          NhietDo = (int8_t)temp;
+          DoAm = (uint8_t)humi;
+
+          if (!yeuCauDoiWifi &&
+              !dangQuetWifi &&
+              firebaseDaKhoiTao &&
+              Firebase.ready())
+          {
+            FirebaseJson json;
+            json.set("NhietDo", temp);
+            json.set("DoAm", humi);
+
+            Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json);
+          }
+        }
       }
     }
 
@@ -1449,7 +1471,7 @@ void XuLyThoiGianReoFirebase()
   }
 }
 
-void TaskKhoiTaoNgatCore0(void *ThamSo)
+void TaskKhoiTaoNgatCore(void *ThamSo)
 {
 
   xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, 5, &hTaskScanLED, 1);
@@ -1457,7 +1479,7 @@ void TaskKhoiTaoNgatCore0(void *ThamSo)
   timer = timerBegin(0, cpuClock, true);
   timerAttachInterrupt(timer, &triggerScan, true);
 
-  timerAlarmWrite(timer, 800, true);
+  timerAlarmWrite(timer, 1200, true);
   timerAlarmEnable(timer);
   vTaskDelete(NULL);
 }
