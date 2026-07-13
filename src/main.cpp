@@ -956,6 +956,11 @@ void TaskDocDHT(void *param)
 
   for (;;)
   {
+    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 30000UL))
+    {
+      dhtDaOnDinh = true;
+      Serial.println("[DHT] Da on dinh");
+    }
     if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
     {
       if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
