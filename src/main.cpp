@@ -149,8 +149,14 @@ void SafePrintln(const String &s)
     xSemaphoreGive(serialMutex);
 }
 
+unsigned long TimeBatDauMatKetNoi = 0;
+bool dangTheoDoiMatKetNoi = false;
+#define NGUONG_MAT_KET_NOI_MS 60000UL
+
 unsigned long TimeGuiHeartbeat = 0;
 uint32_t heartbeatCounter = 0;
+
+bool daTungKetNoiWiFi = false;
 
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
@@ -210,20 +216,51 @@ void ThuKetNoiLaiWiFi()
   delay(200);
 
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("[WiFi] Reconnect OK");
+
+    if (bleDangPhat)
+    {
+      TatBLEMode();
+    }
+  }
 }
 
-// Neu BLE dang bat ma WiFi da co ket noi (vi du WiFi cu tu hoi phuc qua ThuKetNoiLaiWiFi(),
-// khong nhat thiet phai doi WiFi qua BLE) thi tat BLE va kich hoat Firebase luon,
-// khong can theo doi/timeout gi ca.
-void KiemTraTatBLEKhiCoWifi()
+void KiemTraMatKetNoiWifi()
 {
-  if (bleDangPhat && WiFi.status() == WL_CONNECTED)
+  if (WiFi.status() == WL_CONNECTED)
   {
-    if (!firebaseDaKhoiTao)
+    dangTheoDoiMatKetNoi = false;
+
+    // nếu BLE đang bật thì tắt
+    if (bleDangPhat)
     {
-      KichHoatCauHinhFirebase();
+      Serial.println("[WiFi] Da hoi phuc, tat BLE...");
+      delay(3000);
+      if (WiFi.status() == WL_CONNECTED)
+      {
+        TatBLEMode();
+      }
     }
-    TatBLEMode();
+
+    return;
+  }
+
+  if (daTungKetNoiWiFi)
+  {
+    return;
+  }
+
+  if (!dangTheoDoiMatKetNoi)
+  {
+    dangTheoDoiMatKetNoi = true;
+    TimeBatDauMatKetNoi = millis();
+  }
+  else if (!bleDangPhat && millis() - TimeBatDauMatKetNoi >= NGUONG_MAT_KET_NOI_MS)
+  {
+    Serial.println("[WiFi] Lan dau khong ket noi duoc, bat BLE...");
+    BatBLEMode();
   }
 }
 
@@ -778,6 +815,7 @@ void TaskKetNoiWifiBanDau(void *param)
   {
     Serial.println("\n[WiFi] Da ket noi WiFi thanh cong!");
     WiFi.setAutoReconnect(true);
+    daTungKetNoiWiFi = true;
     KichHoatCauHinhFirebase();
   }
   else
@@ -825,7 +863,7 @@ void loop()
 {
   XuLyDoiWifiTuBLE();
   ThuKetNoiLaiWiFi();
-  KiemTraTatBLEKhiCoWifi();
+  KiemTraMatKetNoiWifi();
   KiemTraLaiRTC();
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
   BaoThuc(now);
