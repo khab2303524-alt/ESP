@@ -42,7 +42,7 @@
 #define CHU_KY_QUET_WIFI_MS 3000UL
 #define CHU_KY_HEARTBEAT_MS 800UL
 #define CHU_KY_DOC_BAO_THUC_MS 4000UL
-#define CHU_KY_DOC_DHT_MS 15000UL
+#define CHU_KY_DOC_DHT_MS 30000UL
 #define CHU_KY_THU_LAI_WIFI 10000UL
 
 unsigned long lastRetryWiFi = 0;
@@ -924,7 +924,7 @@ void TaskDocDHT(void *param)
 
   for (;;)
   {
-    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 30000UL))
+    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 60000UL))
     {
       dhtDaOnDinh = true;
       Serial.println("[DHT] Da on dinh");
@@ -1226,34 +1226,6 @@ void KiemTraTatChuong()
   else
   {
     digitalWrite(BELL, LOW);
-  }
-}
-
-void CamBienDHT()
-{
-  if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 30000UL))
-  {
-    dhtDaOnDinh = true;
-  }
-  if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
-  {
-    TimeDocDHT = millis();
-    float temp = dht.readTemperature();
-    float humi = dht.readHumidity();
-    if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
-    {
-      if (!yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao && Firebase.ready())
-      {
-        FirebaseJson json;
-        json.set("NhietDo", temp);
-        json.set("DoAm", humi);
-        FirebaseData dhtData;
-        dhtData.setBSSLBufferSize(2048, 1024);
-        Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json);
-      }
-      NhietDo = (int8_t)temp;
-      DoAm = (uint8_t)humi;
-    }
   }
 }
 
@@ -1594,7 +1566,7 @@ void MatrixPanel()
   bool phutThayDoi = (Phut != phutTruocDo || NhietDo != nhietDoTruocDo || DoAm != doAmTruocDo);
   bool trangThaiBaoThucThayDoi = (trangThaiBaoThuc != trangThaiBaoThucTruocDo);
   bool canToggle = (millis() - thoiGianToggle >= 500);
-  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 15000);
+  bool canDoiCamBien = (millis() - thoiGianDoiCamBien >= 30000);
 
   if (canToggle)
   {
@@ -1603,23 +1575,23 @@ void MatrixPanel()
     dmd.selectFont(System5x7);
     if (dauHaiChamHien)
     {
-      veHaiCham(15, 1, GRAPHICS_NORMAL);
+      veHaiCham(15, 0, GRAPHICS_NORMAL);
     }
     else
     {
-      dmd.drawFilledBox(15, 2, 16, 6, GRAPHICS_INVERSE);
+      dmd.drawFilledBox(15, 1, 16, 5, GRAPHICS_INVERSE);
     }
     if (!dhtDaOnDinh)
     {
       if (dauHaiChamHien)
       {
-        dmd.drawLine(9, 13, 14, 13, GRAPHICS_NORMAL);
-        dmd.drawLine(17, 13, 22, 13, GRAPHICS_NORMAL);
+        dmd.drawLine(9, 12, 14, 12, GRAPHICS_NORMAL);
+        dmd.drawLine(17, 12, 22, 12, GRAPHICS_NORMAL);
       }
       else
       {
-        dmd.drawFilledBox(9, 13, 14, 13, GRAPHICS_INVERSE);
-        dmd.drawFilledBox(17, 13, 22, 13, GRAPHICS_INVERSE);
+        dmd.drawFilledBox(9, 12, 14, 12, GRAPHICS_INVERSE);
+        dmd.drawFilledBox(17, 12, 22, 12, GRAPHICS_INVERSE);
       }
     }
     if (trangThaiBaoThuc == 2 && dhtDaOnDinh)
@@ -1673,11 +1645,11 @@ void MatrixPanel()
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
-    dmd.drawString(3, 1, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(18, 1, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(3, 0, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(18, 0, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
-      veHaiCham(15, 1, GRAPHICS_NORMAL);
+      veHaiCham(15, 0, GRAPHICS_NORMAL);
 
     if (dhtDaOnDinh)
     {
@@ -1702,8 +1674,8 @@ void MatrixPanel()
     {
       if (dauHaiChamHien)
       {
-        dmd.drawLine(9, 13, 14, 13, GRAPHICS_NORMAL);
-        dmd.drawLine(17, 13, 22, 13, GRAPHICS_NORMAL);
+        dmd.drawLine(9, 12, 14, 12, GRAPHICS_NORMAL);
+        dmd.drawLine(17, 12, 22, 12, GRAPHICS_NORMAL);
       }
     }
 
@@ -1728,11 +1700,4 @@ void MatrixPanel()
       dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
     }
   }
-  dmd.drawLine(0, 0, 0, 8, GRAPHICS_NORMAL);
-  dmd.drawLine(0, 0, 1, 0, GRAPHICS_NORMAL);
-  dmd.drawLine(0, 8, 1, 8, GRAPHICS_NORMAL);
-
-  dmd.drawLine(31, 0, 31, 8, GRAPHICS_NORMAL);
-  dmd.drawLine(30, 0, 31, 0, GRAPHICS_NORMAL);
-  dmd.drawLine(30, 8, 31, 8, GRAPHICS_NORMAL);
 }
