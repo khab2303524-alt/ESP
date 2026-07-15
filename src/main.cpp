@@ -915,7 +915,7 @@ void TaskMatrixPanel(void *param)
   }
 }
 
-#define NHIET_DO_OFFSET 2.0f
+#define NHIET_DO_OFFSET 1.2f
 
 void TaskDocDHT(void *param)
 {
@@ -1238,7 +1238,7 @@ void CamBienDHT()
   if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
   {
     TimeDocDHT = millis();
-    float temp = dht.readTemperature() - NHIET_DO_OFFSET;
+    float temp = dht.readTemperature();
     float humi = dht.readHumidity();
     if (!isnan(temp) && !isnan(humi) && dhtDaOnDinh)
     {
