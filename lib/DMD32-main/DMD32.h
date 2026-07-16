@@ -224,8 +224,8 @@ private:
   SPIClass *vspi = NULL;
   static const int spiClk = 4000000; // 4 MHz SPI clock
 
-  // Độ sáng màn hình (0–255), mặc định 50
-  uint8_t _brightness = 50;
+  // Độ sáng màn hình (0–255), mặc định 200
+  uint8_t _brightness = 200;
 };
 
 #endif /* DMD_H_ */

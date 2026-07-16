@@ -42,7 +42,7 @@
 #define CHU_KY_QUET_WIFI_MS 3000UL
 #define CHU_KY_HEARTBEAT_MS 800UL
 #define CHU_KY_DOC_BAO_THUC_MS 4000UL
-#define CHU_KY_DOC_DHT_MS 30000UL
+#define CHU_KY_DOC_DHT_MS 15000UL
 #define CHU_KY_THU_LAI_WIFI 10000UL
 
 unsigned long lastRetryWiFi = 0;
@@ -818,8 +818,7 @@ void setup()
 
   xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
-
-  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 0);
 }
 
 void loop()
@@ -886,9 +885,6 @@ void loop()
 
 void IRAM_ATTR triggerScan()
 {
-  if (docDHT)
-    return;
-
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
   if (hTaskScanLED)
@@ -915,12 +911,16 @@ void TaskMatrixPanel(void *param)
   }
 }
 
-#define NHIET_DO_OFFSET 1.2f
+#define NHIET_DO_OFFSET 2.0f
 
 void TaskDocDHT(void *param)
 {
   FirebaseData dhtData;
   dhtData.setBSSLBufferSize(2048, 1024);
+
+  static bool canGuiDHTLenFirebase = false;
+  static float tempChoGui = 0;
+  static float humiChoGui = 0;
 
   for (;;)
   {
@@ -930,44 +930,80 @@ void TaskDocDHT(void *param)
       Serial.println("[DHT] Da on dinh");
     }
 
-    if (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0)
+    if (dhtDaOnDinh && (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0))
     {
-      TimeDocDHT = millis();
-
-      if (!dhtDaOnDinh)
+      // Neu WiFi/BLE dang hoat dong RF manh (quet, doi wifi, dang phat BLE)
+      // thi bo qua lan nay, KHONG cap nhat TimeDocDHT de vong lap ke tiep (1s sau) thu lai ngay,
+      // tranh xung dot timing bit-bang cua DHT voi ngat RF.
+      if (yeuCauDoiWifi || dangQuetWifi || taskDoiWifiDangChay || bleDangPhat)
       {
-        Serial.println("[DHT] Cho on dinh truoc khi doc du lieu, bo qua lan nay");
+        SafePrintln("[DHT] Bo qua lan doc, RF dang ban, se thu lai sau");
       }
       else
       {
+        TimeDocDHT = millis();
+
         docDHT = true;
 
-        float temp = dht.readTemperature() - NHIET_DO_OFFSET;
-        float humi = dht.readHumidity();
+        const uint8_t SO_LAN_THU_LAI_TOI_DA = 2; // ngoai lan doc dau, thu lai toi da 2 lan
+        float temp = NAN;
+        float humi = NAN;
+
+        for (uint8_t lanThu = 0; lanThu <= SO_LAN_THU_LAI_TOI_DA; lanThu++)
+        {
+          temp = dht.readTemperature() - NHIET_DO_OFFSET;
+          humi = dht.readHumidity();
+
+          if (!isnan(temp) && !isnan(humi))
+            break;
+
+          if (lanThu < SO_LAN_THU_LAI_TOI_DA)
+          {
+            SafePrintln("[DHT] Doc loi (NaN), thu lai lan " + String(lanThu + 1) + "...");
+            // DHT22 can toi thieu ~2s giua 2 lan doc de on dinh, khong thu lai ngay lap tuc
+            vTaskDelay(pdMS_TO_TICKS(2200));
+          }
+        }
 
         docDHT = false;
 
         if (isnan(temp) || isnan(humi))
         {
-          Serial.println("[DHT] Doc that bai (NaN)");
+          Serial.println("[DHT] Doc that bai (NaN) sau khi da thu lai");
         }
         else
         {
           NhietDo = (int8_t)temp;
           DoAm = (uint8_t)humi;
 
-          if (!yeuCauDoiWifi &&
-              !dangQuetWifi &&
-              firebaseDaKhoiTao &&
-              Firebase.ready())
-          {
-            FirebaseJson json;
-            json.set("NhietDo", temp);
-            json.set("DoAm", humi);
-
-            Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json);
-          }
+          // Chi luu lai va danh dau can gui, KHONG gui ngay tai day.
+          // Viec gui se duoc thu moi vong lap (1s) ben duoi, doc lap voi chu ky doc 150s,
+          // de khong bi "mat" lan gui chi vi dung luc Firebase/WiFi chua san sang.
+          tempChoGui = temp;
+          humiChoGui = humi;
+          canGuiDHTLenFirebase = true;
         }
+      }
+    }
+
+    // Thu gui moi vong lap, cho toi khi thanh cong thi thoi
+    if (canGuiDHTLenFirebase &&
+        !yeuCauDoiWifi &&
+        !dangQuetWifi &&
+        firebaseDaKhoiTao &&
+        Firebase.ready())
+    {
+      FirebaseJson json;
+      json.set("NhietDo", tempChoGui);
+      json.set("DoAm", humiChoGui);
+
+      if (Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json))
+      {
+        canGuiDHTLenFirebase = false;
+      }
+      else
+      {
+        SafePrintln("[DHT] Gui Firebase that bai: " + dhtData.errorReason() + ", se thu lai");
       }
     }
 
@@ -1503,7 +1539,7 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
   if (!rtcOk)
     return 0;
   static uint8_t trangThaiGanNhat = 0;
-  bool coBaoThucBat = false;
+  bool coBaoThucDangBat = false;
   bool sapReoTrong10Phut = false;
   uint32_t phutHienTai = now.hour() * 60 + now.minute();
 
@@ -1514,7 +1550,7 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
   {
     if (dsbaothuc[i].active)
     {
-      coBaoThucBat = true;
+      coBaoThucDangBat = true;
       uint32_t phutBaoThuc = dsbaothuc[i].gio * 60 + dsbaothuc[i].phut;
       int32_t khoangCachPhut = (int32_t)phutBaoThuc - (int32_t)phutHienTai;
       if (khoangCachPhut < 0)
@@ -1524,18 +1560,33 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
       if (khoangCachPhut > 0 && khoangCachPhut <= 10)
       {
         sapReoTrong10Phut = true;
+        break;
       }
     }
   }
   xSemaphoreGive(baoThucMutex);
 
-  if (sapReoTrong10Phut)
-    trangThaiGanNhat = 2;
-  else if (coBaoThucBat)
-    trangThaiGanNhat = 1;
-  else
-    trangThaiGanNhat = 0;
+  // 0: khong co bao thuc nao dang bat
+  // 1: co it nhat 1 bao thuc dang bat (icon co dinh)
+  // 2: sap reo trong vong 10 phut (icon nhap nhay)
+  trangThaiGanNhat = sapReoTrong10Phut ? 2 : (coBaoThucDangBat ? 1 : 0);
   return trangThaiGanNhat;
+}
+
+void VeIconDongHo(int x, int y, byte style)
+{
+  // mat dong ho tron 5x5, co kim gio
+  const uint8_t hinh[5] = {
+    0b01110,
+    0b10101,
+    0b10111,
+    0b10001,
+    0b01110
+  };
+  for (int row = 0; row < 5; row++)
+    for (int col = 0; col < 5; col++)
+      if (hinh[row] & (0x10 >> col))
+        dmd.writePixel(x + col, y + row, style, 1);
 }
 
 void veHaiCham(int x, int y, byte style)
@@ -1557,7 +1608,10 @@ void MatrixPanel()
   static int8_t doAmTruocDo = -1;
   static uint8_t trangThaiBaoThucTruocDo = 99;
   uint8_t trangThaiBaoThuc = KiemTraTrangThaiIconBaoThuc(now);
-  uint8_t toadoX_DongDuoi = (trangThaiBaoThuc == 0) ? 6 : 0;
+  uint8_t toadoX_DongDuoi = (trangThaiBaoThuc == 0) ? 1 : 0;
+  uint8_t dichTraiIcon = (trangThaiBaoThuc != 0) ? 3 : 0;
+  const uint8_t iconDongHo_X = 27;
+  const uint8_t iconDongHo_Y = 2;
   static unsigned long thoiGianToggle = 0;
   static bool dauHaiChamHien = true;
   static unsigned long thoiGianDoiCamBien = 0;
@@ -1575,11 +1629,22 @@ void MatrixPanel()
     dmd.selectFont(System5x7);
     if (dauHaiChamHien)
     {
-      veHaiCham(15, 0, GRAPHICS_NORMAL);
+      veHaiCham(15 - dichTraiIcon, 0, GRAPHICS_NORMAL);
     }
     else
     {
-      dmd.drawFilledBox(15, 1, 16, 5, GRAPHICS_INVERSE);
+      dmd.drawFilledBox(15 - dichTraiIcon, 1, 16 - dichTraiIcon, 5, GRAPHICS_INVERSE);
+    }
+    if (trangThaiBaoThuc == 2)
+    {
+      if (dauHaiChamHien)
+      {
+        VeIconDongHo(iconDongHo_X, iconDongHo_Y, GRAPHICS_NORMAL);
+      }
+      else
+      {
+        dmd.drawFilledBox(iconDongHo_X, iconDongHo_Y, iconDongHo_X + 4, iconDongHo_Y + 4, GRAPHICS_INVERSE);
+      }
     }
     if (!dhtDaOnDinh)
     {
@@ -1596,30 +1661,7 @@ void MatrixPanel()
     }
     if (trangThaiBaoThuc == 2 && dhtDaOnDinh)
     {
-      const uint8_t startX = 27;
-      const uint8_t startY = 11;
-      if (dauHaiChamHien)
-      {
-        dmd.writePixel(startX + 1, startY + 0, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 2, startY + 0, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 3, startY + 0, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 0, startY + 1, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 2, startY + 1, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 4, startY + 1, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 0, startY + 2, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 2, startY + 2, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 3, startY + 2, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 4, startY + 2, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 0, startY + 3, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 4, startY + 3, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 1, startY + 4, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 2, startY + 4, GRAPHICS_NORMAL, 1);
-        dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
-      }
-      else
-      {
-        dmd.drawFilledBox(startX, startY, startX + 4, startY + 4, GRAPHICS_INVERSE);
-      }
+      // TODO: chua trien khai - truoc day gay ghosting do ve ngoai vung panel (startX+4 = 33 > 31)
     }
   }
 
@@ -1636,8 +1678,7 @@ void MatrixPanel()
     nhietDoTruocDo = NhietDo;
     doAmTruocDo = DoAm;
     trangThaiBaoThucTruocDo = trangThaiBaoThuc;
-    dmd.drawFilledBox(3, 2, 14, 7, GRAPHICS_INVERSE);
-    dmd.drawFilledBox(17, 2, 29, 7, GRAPHICS_INVERSE);
+    dmd.drawFilledBox(0, 0, 31, 7, GRAPHICS_INVERSE);
     dmd.drawFilledBox(0, 9, 31, 15, GRAPHICS_INVERSE);
 
     dmd.selectFont(System5x7);
@@ -1645,29 +1686,40 @@ void MatrixPanel()
     char TextPhut[3];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
-    dmd.drawString(3, 0, TextGio, 2, GRAPHICS_NORMAL);
-    dmd.drawString(18, 0, TextPhut, 2, GRAPHICS_NORMAL);
+    dmd.drawString(3 - dichTraiIcon, 0, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(18 - dichTraiIcon, 0, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
-      veHaiCham(15, 0, GRAPHICS_NORMAL);
+      veHaiCham(15 - dichTraiIcon, 0, GRAPHICS_NORMAL);
+
+    if (trangThaiBaoThuc == 1)
+      VeIconDongHo(iconDongHo_X, iconDongHo_Y, GRAPHICS_NORMAL);
 
     if (dhtDaOnDinh)
     {
       if (hienNhietDo)
       {
-        ve1ChuCai3x5(dmd, toadoX_DongDuoi, 11, 'T');
-        ve1ChuCai3x5(dmd, toadoX_DongDuoi + 4, 11, ':');
+        dmd.drawString(toadoX_DongDuoi, 9, "T", 1, GRAPHICS_NORMAL);
+        veHaiCham(toadoX_DongDuoi + 6, 9, GRAPHICS_NORMAL);
         char textSo[3];
         sprintf(textSo, "%02d", NhietDo);
-        printIn3x5(dmd, toadoX_DongDuoi + 6, 11, textSo, 2);
+        dmd.drawString(toadoX_DongDuoi + 10, 9, textSo, 2, GRAPHICS_NORMAL);
+        const uint8_t deg[2] = {0x60, 0x60};
+        for (int row = 0; row < 2; row++)
+          for (int col = 0; col < 2; col++)
+            if (deg[row] & (0x40 >> col))
+              dmd.writePixel(toadoX_DongDuoi + 22 + col, 9 + row, GRAPHICS_NORMAL, 1);
+        dmd.drawChar(toadoX_DongDuoi + 25, 9, 'C', GRAPHICS_NORMAL);
+
       }
       else
       {
-        ve1ChuCai3x5(dmd, toadoX_DongDuoi, 11, 'H');
-        ve1ChuCai3x5(dmd, toadoX_DongDuoi + 4, 11, ':');
+        dmd.drawString(toadoX_DongDuoi, 9, "H", 1, GRAPHICS_NORMAL);
+        veHaiCham(toadoX_DongDuoi + 6, 9, GRAPHICS_NORMAL);
         char textDoAm[3];
         sprintf(textDoAm, "%02d", DoAm);
-        printIn3x5(dmd, toadoX_DongDuoi + 6, 11, textDoAm, 1);
+        dmd.drawString(toadoX_DongDuoi + 10, 9, textDoAm, 2, GRAPHICS_NORMAL);
+        VeDauPhanTram(toadoX_DongDuoi + 23, 9);
       }
     }
     else
@@ -1677,27 +1729,6 @@ void MatrixPanel()
         dmd.drawLine(9, 12, 14, 12, GRAPHICS_NORMAL);
         dmd.drawLine(17, 12, 22, 12, GRAPHICS_NORMAL);
       }
-    }
-
-    if (trangThaiBaoThuc == 1 && dhtDaOnDinh)
-    {
-      const uint8_t startX = 27;
-      const uint8_t startY = 11;
-      dmd.writePixel(startX + 1, startY + 0, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 2, startY + 0, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 3, startY + 0, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 0, startY + 1, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 2, startY + 1, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 4, startY + 1, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 0, startY + 2, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 2, startY + 2, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 3, startY + 2, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 4, startY + 2, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 0, startY + 3, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 4, startY + 3, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 1, startY + 4, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 2, startY + 4, GRAPHICS_NORMAL, 1);
-      dmd.writePixel(startX + 3, startY + 4, GRAPHICS_NORMAL, 1);
     }
   }
 }
