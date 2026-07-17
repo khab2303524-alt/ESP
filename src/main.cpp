@@ -42,7 +42,7 @@
 #define CHU_KY_QUET_WIFI_MS 3000UL
 #define CHU_KY_HEARTBEAT_MS 800UL
 #define CHU_KY_DOC_BAO_THUC_MS 4000UL
-#define CHU_KY_DOC_DHT_MS 15000UL
+#define CHU_KY_DOC_DHT_MS 150000UL
 #define CHU_KY_THU_LAI_WIFI 10000UL
 
 unsigned long lastRetryWiFi = 0;
@@ -207,8 +207,30 @@ void ThuKetNoiLaiWiFi()
 
   Serial.println("[WiFi] Thu ket noi lai...");
 
+  // Neu BLE dang advertising (che do du phong), tam dung vai giay de
+  // nhuong song radio cho WiFi, tranh xung dot coexistence khien
+  // ket noi lai luon that bai trong luc BLE dang bat.
+  bool canBatLaiBLE = bleDangPhat;
+  if (canBatLaiBLE)
+  {
+    BLEDevice::getAdvertising()->stop();
+  }
+
   WiFi.disconnect();
   WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+
+  if (canBatLaiBLE)
+  {
+    unsigned long tCho = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - tCho < 5000)
+    {
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      BLEDevice::startAdvertising();
+    }
+  }
 }
 
 unsigned long TimeChoOnDinhTruocKhiTatBLE = 0;
@@ -911,7 +933,7 @@ void TaskMatrixPanel(void *param)
   }
 }
 
-#define NHIET_DO_OFFSET 2.0f
+#define NHIET_DO_OFFSET 1.5f
 
 void TaskDocDHT(void *param)
 {
@@ -1608,7 +1630,7 @@ void MatrixPanel()
   static int8_t doAmTruocDo = -1;
   static uint8_t trangThaiBaoThucTruocDo = 99;
   uint8_t trangThaiBaoThuc = KiemTraTrangThaiIconBaoThuc(now);
-  uint8_t toadoX_DongDuoi = (trangThaiBaoThuc == 0) ? 1 : 0;
+  uint8_t toadoX_DongDuoi = (trangThaiBaoThuc == 0) ? 1 : 1;
   uint8_t dichTraiIcon = (trangThaiBaoThuc != 0) ? 3 : 0;
   const uint8_t iconDongHo_X = 27;
   const uint8_t iconDongHo_Y = 2;
