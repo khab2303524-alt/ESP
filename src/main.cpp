@@ -206,9 +206,6 @@ void ThuKetNoiLaiWiFi()
 
   Serial.println("[WiFi] Thu ket noi lai...");
 
-  // Neu BLE dang advertising (che do du phong), tam dung vai giay de
-  // nhuong song radio cho WiFi, tranh xung dot coexistence khien
-  // ket noi lai luon that bai trong luc BLE dang bat.
   bool canBatLaiBLE = bleDangPhat;
   if (canBatLaiBLE)
   {
