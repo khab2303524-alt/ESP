@@ -11,7 +11,6 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
 
@@ -933,8 +932,6 @@ void TaskMatrixPanel(void *param)
   }
 }
 
-#define NHIET_DO_OFFSET 1.5f
-
 void TaskDocDHT(void *param)
 {
   FirebaseData dhtData;
@@ -954,9 +951,6 @@ void TaskDocDHT(void *param)
 
     if (dhtDaOnDinh && (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0))
     {
-      // Neu WiFi/BLE dang hoat dong RF manh (quet, doi wifi, dang phat BLE)
-      // thi bo qua lan nay, KHONG cap nhat TimeDocDHT de vong lap ke tiep (1s sau) thu lai ngay,
-      // tranh xung dot timing bit-bang cua DHT voi ngat RF.
       if (yeuCauDoiWifi || dangQuetWifi || taskDoiWifiDangChay || bleDangPhat)
       {
         SafePrintln("[DHT] Bo qua lan doc, RF dang ban, se thu lai sau");
@@ -967,13 +961,13 @@ void TaskDocDHT(void *param)
 
         docDHT = true;
 
-        const uint8_t SO_LAN_THU_LAI_TOI_DA = 2; // ngoai lan doc dau, thu lai toi da 2 lan
+        const uint8_t SO_LAN_THU_LAI_TOI_DA = 2;
         float temp = NAN;
         float humi = NAN;
 
         for (uint8_t lanThu = 0; lanThu <= SO_LAN_THU_LAI_TOI_DA; lanThu++)
         {
-          temp = dht.readTemperature() - NHIET_DO_OFFSET;
+          temp = dht.readTemperature();
           humi = dht.readHumidity();
 
           if (!isnan(temp) && !isnan(humi))
@@ -997,10 +991,6 @@ void TaskDocDHT(void *param)
         {
           NhietDo = (int8_t)temp;
           DoAm = (uint8_t)humi;
-
-          // Chi luu lai va danh dau can gui, KHONG gui ngay tai day.
-          // Viec gui se duoc thu moi vong lap (1s) ben duoi, doc lap voi chu ky doc 150s,
-          // de khong bi "mat" lan gui chi vi dung luc Firebase/WiFi chua san sang.
           tempChoGui = temp;
           humiChoGui = humi;
           canGuiDHTLenFirebase = true;
@@ -1008,7 +998,6 @@ void TaskDocDHT(void *param)
       }
     }
 
-    // Thu gui moi vong lap, cho toi khi thanh cong thi thoi
     if (canGuiDHTLenFirebase &&
         !yeuCauDoiWifi &&
         !dangQuetWifi &&
@@ -1599,12 +1588,11 @@ void VeIconDongHo(int x, int y, byte style)
 {
   // mat dong ho tron 5x5, co kim gio
   const uint8_t hinh[5] = {
-    0b01110,
-    0b10101,
-    0b10111,
-    0b10001,
-    0b01110
-  };
+      0b01110,
+      0b10101,
+      0b10111,
+      0b10001,
+      0b01110};
   for (int row = 0; row < 5; row++)
     for (int col = 0; col < 5; col++)
       if (hinh[row] & (0x10 >> col))
@@ -1732,7 +1720,6 @@ void MatrixPanel()
             if (deg[row] & (0x40 >> col))
               dmd.writePixel(toadoX_DongDuoi + 22 + col, 9 + row, GRAPHICS_NORMAL, 1);
         dmd.drawChar(toadoX_DongDuoi + 25, 9, 'C', GRAPHICS_NORMAL);
-
       }
       else
       {
