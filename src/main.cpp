@@ -1666,10 +1666,6 @@ void MatrixPanel()
         dmd.drawFilledBox(17, 12, 22, 12, GRAPHICS_INVERSE);
       }
     }
-    if (trangThaiBaoThuc == 2 && dhtDaOnDinh)
-    {
-      // TODO: chua trien khai - truoc day gay ghosting do ve ngoai vung panel (startX+4 = 33 > 31)
-    }
   }
 
   if (canDoiCamBien)
