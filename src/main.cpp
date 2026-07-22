@@ -32,7 +32,7 @@
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 #define CHU_KY_CHUONG_THU_CONG_MS 500UL
-#define CHU_KY_GHI_THOI_GIAN_MS 20000UL
+#define CHU_KY_GHI_THOI_GIAN_MS 1000UL
 #define CHU_KY_DAT_NGAY_MS 800UL
 #define CHU_KY_DAT_GIO_MS 800UL
 #define CHU_KY_DO_SANG_MS 8000UL
@@ -1019,7 +1019,7 @@ void TaskDocDHT(void *param)
 
   for (;;)
   {
-    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 60000UL))
+    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 180000UL))
     {
       dhtDaOnDinh = true;
       Serial.println("[DHT] Da on dinh");
@@ -1768,7 +1768,7 @@ void MatrixPanel()
     char TextPhut[5];
     sprintf(TextGio, "%02d", Gio);
     sprintf(TextPhut, "%02d", Phut);
-    dmd.drawString(2, 0, TextGio, 2, GRAPHICS_NORMAL);
+    dmd.drawString(3, 0, TextGio, 2, GRAPHICS_NORMAL);
     dmd.drawString(19, 0, TextPhut, 2, GRAPHICS_NORMAL);
 
     if (dauHaiChamHien)
@@ -1802,7 +1802,7 @@ void MatrixPanel()
         char textDoAm[5];
         sprintf(textDoAm, "%02d", DoAm);
         dmd.drawString(12, 9, textDoAm, 2, GRAPHICS_NORMAL);
-        VeDauPhanTram(25, 11);
+        VeDauPhanTram(25, 10);
       }
     }
     else
