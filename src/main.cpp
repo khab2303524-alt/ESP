@@ -7,10 +7,7 @@
 #include <SPI.h>
 #include <DMD32.h>
 #include <Preferences.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <WiFiManager.h>
 #include "fonts/SystemFont5x7.h"
 #include "fonts/Font3x5.h"
 
@@ -28,28 +25,15 @@
 #define DISPLAYS_ACROSS 1
 #define DISPLAYS_DOWN 1
 
-#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-
 #define CHU_KY_CHUONG_THU_CONG_MS 500UL
 #define CHU_KY_GHI_THOI_GIAN_MS 1000UL
-#define CHU_KY_DAT_NGAY_MS 800UL
+#define CHU_KY_DAT_NGAY_MS 700UL
 #define CHU_KY_DAT_GIO_MS 800UL
-#define CHU_KY_DO_SANG_MS 8000UL
+#define CHU_KY_DO_SANG_MS 3000UL
 #define CHU_KY_THOI_GIAN_REO_MS 8000UL
-#define CHU_KY_WIFI_CAPNHAT_MS 12000UL
-#define CHU_KY_QUET_WIFI_MS 3000UL
-#define CHU_KY_HEARTBEAT_MS 800UL
+#define CHU_KY_DINH_DANG_GIO_MS 8000UL
 #define CHU_KY_DOC_BAO_THUC_MS 4000UL
 #define CHU_KY_DOC_DHT_MS 15000UL
-#define CHU_KY_THU_LAI_WIFI 10000UL
-#define NGUONG_MAT_MANG_LAU_MS 30000UL // mat wifi lien tuc qua thoi gian nay -> lam moi phien Firebase khi co lai
-
-unsigned long lastRetryWiFi = 0;
-
-bool dangTheoDoiMatWifi = false;
-unsigned long TimeBatDauMatWifi = 0;
-bool canLamMoiFirebase = false;
 
 FirebaseData Data;
 FirebaseAuth Auth;
@@ -75,6 +59,8 @@ unsigned long TimeDoiPhaChuong = 0;
 bool dangPhaNghiChuong = false;
 uint16_t ThoiGianReoGiay = 5;
 unsigned long TimeCheckThoiGianReo = 0;
+unsigned long TimeCheckDinhDangGio = 0;
+bool DinhDang24Gio = true; // true = 24h, false = 12h (AM/PM)
 
 bool chuongThuCongFirebase = false;
 unsigned long TimeCheckChuongThuCong = 0;
@@ -92,8 +78,6 @@ unsigned long TimeCheckDoSang = 0;
 bool dhtDaOnDinh = false;
 unsigned long thoiGianKhoiDongDht = 0;
 
-bool bleDangTat = false;
-
 int8_t phutcuoicung = -1;
 int8_t NhietDo = 0;
 uint8_t DoAm = 0;
@@ -110,9 +94,13 @@ typedef struct __attribute__((packed))
 
 baothuc dsbaothuc[MAX_BAO_THUC];
 uint8_t thuMaskBaoThuc[MAX_BAO_THUC];
-bool firebaseDaKhoiTao = false;
+volatile bool firebaseDaKhoiTao = false;
 bool baoThucCanDongBoFirebase = false;
 unsigned long TimeThuLaiDongBoBaoThuc = 0;
+volatile bool ssidCanDongBoFirebase = false;
+unsigned long TimeThuLaiSsidFirebase = 0;
+
+bool apModeActive = false;
 
 String wifiSSID = SSID_DEFAULT;
 String wifiPassword = PASSWORD_DEFAULT;
@@ -124,16 +112,14 @@ String pendingPass = "";
 
 volatile bool dangQuetWifi = false;
 unsigned long TimeCheckQuetWifi = 0;
+unsigned long TimeCheckWifi = 0;
 
 TaskHandle_t hTaskScanLED = NULL;
 volatile bool canScan = false;
 SemaphoreHandle_t serialMutex = NULL;
 SemaphoreHandle_t baoThucMutex = NULL;
+
 bool taskDocBaoThucDaTao = false;
-
-BLECharacteristic *pCharacteristic;
-bool bleDangPhat = false;
-
 volatile bool docDHT = false;
 
 void SafePrint(const String &s)
@@ -154,9 +140,6 @@ void SafePrintln(const String &s)
     xSemaphoreGive(serialMutex);
 }
 
-unsigned long TimeGuiHeartbeat = 0;
-uint32_t heartbeatCounter = 0;
-
 void IRAM_ATTR triggerScan();
 void KiemTraTatChuong();
 void BaoThuc(DateTime now);
@@ -166,6 +149,7 @@ void XuLyDatNgayFirebase();
 void XuLyDatGioFirebase();
 void XuLyDoSangFirebase();
 void XuLyThoiGianReoFirebase();
+void XuLyDinhDangGioFirebase();
 uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now);
 void MatrixPanel();
 void KichHoatCauHinhFirebase();
@@ -176,10 +160,10 @@ uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu);
 bool LaBaoThucMotLan(uint8_t index);
 void TaskKhoiTaoNgatCore(void *ThamSo);
 void DocWifiTuFlash();
-void GhiWifiHienTaiLenFirebase();
+bool GhiWifiHienTaiLenFirebase();
+void XuLyDongBoSsidFirebase();
 void XuLyWifiFirebase();
 void TaskDoiWifi(void *param);
-void XuLyDoiWifiTuBLE();
 void XuLyQuetWifiFirebase();
 void TaskQuetWifi(void *param);
 String JsonEscape(const String &s);
@@ -187,138 +171,12 @@ String SanitizeSsid(const String &s);
 void KhoiTaoManHinhLED();
 void KiemTraLaiRTC();
 void TaskKetNoiWifiBanDau(void *param);
-void BatBLEMode();
-void TatBLEMode();
+bool BatAPMode();
+void XuLyAPMode();
 void XuLyChuongThuCongFirebase();
 void TaskMatrixPanel(void *param);
 void TaskDocBaoThucFirebase(void *param);
 void TaskDocDHT(void *param);
-void ThuKetNoiLaiWiFi();
-void KiemTraMatMangLau();
-void LamMoiKetNoiFirebase();
-
-void ThuKetNoiLaiWiFi()
-{
-  if (WiFi.status() == WL_CONNECTED)
-    return;
-
-  if (yeuCauDoiWifi || taskDoiWifiDangChay || dangQuetWifi)
-    return;
-
-  if (millis() - lastRetryWiFi < CHU_KY_THU_LAI_WIFI)
-    return;
-
-  lastRetryWiFi = millis();
-
-  Serial.println("[WiFi] Thu ket noi lai...");
-
-  bool canBatLaiBLE = bleDangPhat;
-  if (canBatLaiBLE)
-  {
-    BLEDevice::getAdvertising()->stop();
-  }
-
-  WiFi.disconnect();
-  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-
-  if (canBatLaiBLE)
-  {
-    unsigned long tCho = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - tCho < 5000)
-    {
-      vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    if (WiFi.status() != WL_CONNECTED)
-    {
-      BLEDevice::startAdvertising();
-    }
-  }
-}
-
-unsigned long TimeChoOnDinhTruocKhiTatBLE = 0;
-bool dangChoOnDinhTruocKhiTatBLE = false;
-
-void KiemTraMatKetNoiWifi()
-{
-
-  if (WiFi.status() == WL_CONNECTED && bleDangPhat)
-  {
-    if (!dangChoOnDinhTruocKhiTatBLE)
-    {
-      dangChoOnDinhTruocKhiTatBLE = true;
-      TimeChoOnDinhTruocKhiTatBLE = millis();
-      Serial.println("[WiFi] Da hoi phuc, cho on dinh truoc khi tat BLE...");
-    }
-    else if (millis() - TimeChoOnDinhTruocKhiTatBLE >= 3000)
-    {
-      if (WiFi.status() == WL_CONNECTED)
-      {
-        TatBLEMode();
-
-        if (WiFi.status() != WL_CONNECTED)
-        {
-          Serial.println("[WiFi] Bi rot ngay sau khi tat BLE, thu ket noi lai ngay...");
-          lastRetryWiFi = 0;
-        }
-      }
-      dangChoOnDinhTruocKhiTatBLE = false;
-    }
-  }
-  else
-  {
-    dangChoOnDinhTruocKhiTatBLE = false;
-  }
-}
-
-void LamMoiKetNoiFirebase()
-{
-  SafePrintln("[Firebase] Mat mang qua lau (>=" + String(NGUONG_MAT_MANG_LAU_MS / 1000) + "s), dang lam moi phien Firebase...");
-  Firebase.begin(&Config, &Auth);
-  Firebase.reconnectWiFi(true);
-}
-
-void KiemTraMatMangLau()
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    if (!dangTheoDoiMatWifi)
-    {
-      dangTheoDoiMatWifi = true;
-      TimeBatDauMatWifi = millis();
-    }
-    return;
-  }
-
-  if (dangTheoDoiMatWifi)
-  {
-    unsigned long thoiGianMat = millis() - TimeBatDauMatWifi;
-    dangTheoDoiMatWifi = false;
-    if (thoiGianMat >= NGUONG_MAT_MANG_LAU_MS && firebaseDaKhoiTao)
-    {
-      canLamMoiFirebase = true;
-    }
-  }
-
-  if (canLamMoiFirebase && firebaseDaKhoiTao)
-  {
-    canLamMoiFirebase = false;
-    LamMoiKetNoiFirebase();
-  }
-}
-
-void GuiHeartbeatFirebase()
-{
-  if (!firebaseDaKhoiTao || !Firebase.ready())
-    return;
-  if (millis() - TimeGuiHeartbeat < CHU_KY_HEARTBEAT_MS && TimeGuiHeartbeat != 0)
-    return;
-  TimeGuiHeartbeat = millis();
-  heartbeatCounter++;
-  if (!Firebase.RTDB.setInt(&Data, F("/DongHo/Heartbeat"), heartbeatCounter))
-  {
-    SafePrintln("[Heartbeat] Gui that bai: " + Data.errorReason());
-  }
-}
 
 void DocWifiTuFlash()
 {
@@ -341,6 +199,54 @@ void DocWifiTuFlash()
   }
 }
 
+const char *TenTrangThaiWiFi(uint8_t trangThai)
+{
+  switch (trangThai)
+  {
+  case WL_CONNECTED:
+    return "CONNECTED";
+  case WL_NO_SSID_AVAIL:
+    return "NO_SSID_AVAIL";
+  case WL_CONNECT_FAILED:
+    return "CONNECT_FAILED";
+  case WL_CONNECTION_LOST:
+    return "CONNECTION_LOST";
+  case WL_DISCONNECTED:
+    return "DISCONNECTED";
+  case WL_IDLE_STATUS:
+    return "IDLE";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+void TheoDoiTrangThaiWiFi()
+{
+  static int trangThaiCu = -1;
+  uint8_t trangThaiMoi = WiFi.status();
+
+  if (trangThaiCu == trangThaiMoi)
+    return;
+
+  if (trangThaiMoi == WL_CONNECTED)
+  {
+    Serial.printf("[WiFi] KET NOI THANH CONG: SSID='%s', IP=%s, RSSI=%d dBm\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  }
+  else if (trangThaiCu == WL_CONNECTED)
+  {
+    Serial.printf("[WiFi] MAT KET NOI: trang thai=%s (%u)\n",
+                  TenTrangThaiWiFi(trangThaiMoi), trangThaiMoi);
+  }
+  else
+  {
+    Serial.printf("[WiFi] Trang thai: %s (%u)\n",
+                  TenTrangThaiWiFi(trangThaiMoi), trangThaiMoi);
+  }
+
+  trangThaiCu = trangThaiMoi;
+}
+
 void XoaWifiFlash()
 {
   preferences.begin("WiFiCfg", false);
@@ -350,101 +256,79 @@ void XoaWifiFlash()
   Serial.println("[Flash] Da xoa WiFi trong flash");
 }
 
-class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
+bool BatAPMode()
 {
-  void onWrite(BLECharacteristic *pChar)
-  {
-    std::string value = pChar->getValue();
+  Serial.println("[AP] Bat AP Mode qua WiFiManager...");
+  WiFiManager wm;
+  wm.setConfigPortalBlocking(false);
+  bool nguoiDungDangCauHinh = false;
 
-    if (value.length() > 0)
+  wm.setPreSaveConfigCallback([&]()
+                              {
+                                nguoiDungDangCauHinh = true;
+                                Serial.println("[AP] Nguoi dung dang thu ket noi WiFi moi, tam dung retry WiFi cu."); });
+
+  wm.setSaveConfigCallback([]()
+                           { Serial.println("[AP] Da luu WiFi moi, dang ket noi..."); });
+
+  wm.startConfigPortal("LED P10");
+  Serial.println("[AP] Config portal dang chay, cho WiFi cu tro lai hoac nguoi dung cau hinh...");
+
+  unsigned long thoiDiemThuLai = millis();
+  unsigned long thoiDiemBatDauAP = millis();
+  bool dangThuWiFiCu = false;
+
+  while (millis() - thoiDiemBatDauAP < 180000UL)
+  {
+    wm.process();
+    TheoDoiTrangThaiWiFi();
+
+    if (WiFi.status() == WL_CONNECTED)
     {
-      String dataStr = String(value.c_str());
-
-      Serial.printf("[BLE] RAW: %s\n", dataStr.c_str());
-
-      int splitIdx = dataStr.indexOf('|');
-      if (splitIdx != -1)
-      {
-        pendingSsid = dataStr.substring(0, splitIdx);
-        pendingPass = dataStr.substring(splitIdx + 1);
-        yeuCauDoiWifi = true;
-
-        Serial.printf("[BLE] OK -> SSID: %s\n", pendingSsid.c_str());
-      }
-      else
-      {
-        Serial.println("[BLE] Loi: Khong co dau '|'");
-      }
+      Serial.printf("[AP] WiFi cu da tro lai: %s\n", WiFi.SSID().c_str());
+      wm.stopConfigPortal();
+      break;
     }
+
+    if (!nguoiDungDangCauHinh && !dangThuWiFiCu && millis() - thoiDiemThuLai >= 5000UL)
+    {
+      dangThuWiFiCu = true;
+      thoiDiemThuLai = millis();
+      Serial.printf("[AP] Thu ket noi lai WiFi da luu: %s\n", wifiSSID.c_str());
+      WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    }
+
+    if (dangThuWiFiCu && millis() - thoiDiemThuLai >= 10000UL)
+    {
+      dangThuWiFiCu = false;
+      WiFi.disconnect(false, false);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(250));
   }
-};
 
-void BatBLEMode()
-{
-  if (bleDangPhat || bleDangTat)
-    return;
-
-  Serial.println("[BLE] Dang khoi tao Bluetooth Server...");
-
-  BLEDevice::deinit(true);
-  vTaskDelay(pdMS_TO_TICKS(500));
-
-  BLEDevice::init("WIFI_SETUP");
-
-  BLEServer *pServer = BLEDevice::createServer();
-
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  pCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_UUID,
-      BLECharacteristic::PROPERTY_READ |
-          BLECharacteristic::PROPERTY_WRITE |
-          BLECharacteristic::PROPERTY_NOTIFY);
-
-  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-  pCharacteristic->addDescriptor(new BLE2902());
-
-  pService->start();
-
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-
-  BLEDevice::startAdvertising();
-
-  bleDangPhat = true;
-
-  Serial.println("[BLE] Bluetooth hoat dong!");
-}
-
-void TatBLEMode()
-{
-  if (!bleDangPhat || bleDangTat)
-    return;
-
-  bleDangTat = true;
-
-  Serial.println("[BLE] Dang tat BLE...");
-
-  BLEAdvertising *pAdv = BLEDevice::getAdvertising();
-  if (pAdv != nullptr)
+  if (WiFi.status() != WL_CONNECTED)
   {
-    pAdv->stop();
+    Serial.println("[AP] Timeout hoac WiFi cu chua tro lai, thoat AP mode va thu lai...");
+    wm.stopConfigPortal();
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(true);
+    return false;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(200));
+  preferences.begin("WiFiCfg", false);
+  preferences.putString("ssid", WiFi.SSID());
+  preferences.putString("pass", WiFi.psk());
+  preferences.end();
+  Serial.printf("[AP] Ket noi thanh cong: %s\n", WiFi.SSID().c_str());
+  apModeActive = false;
 
-  BLEDevice::deinit(true);
-
-  vTaskDelay(pdMS_TO_TICKS(500));
-
-  bleDangPhat = false;
-  bleDangTat = false;
-
-  Serial.println("[BLE] Da tat Bluetooth OK");
+  KichHoatCauHinhFirebase();
+  GhiWifiHienTaiLenFirebase();
+  return true;
 }
 
-unsigned long TimeCheckWifi = 0;
+void XuLyAPMode() {}
 
 void TaskDoiWifi(void *param)
 {
@@ -460,11 +344,6 @@ void TaskDoiWifi(void *param)
   WiFi.disconnect(true);
   vTaskDelay(pdMS_TO_TICKS(1000));
   WiFi.begin(newSsid.c_str(), newPass.c_str());
-
-  if (bleDangPhat)
-  {
-    BLEDevice::getAdvertising()->stop();
-  }
 
   if (hTaskScanLED != NULL)
     vTaskResume(hTaskScanLED);
@@ -482,17 +361,6 @@ void TaskDoiWifi(void *param)
   if (WiFi.status() == WL_CONNECTED)
   {
     Serial.printf("\n[WiFi-Task] Thanh cong: %s\n", newSsid.c_str());
-    Serial.printf("[WiFi] SSID hien tai: %s\n", WiFi.SSID().c_str());
-
-    if (bleDangPhat)
-    {
-      TatBLEMode();
-    }
-
-    if (!firebaseDaKhoiTao)
-    {
-      KichHoatCauHinhFirebase();
-    }
 
     FirebaseData wifiTaskData;
     wifiTaskData.setBSSLBufferSize(4096, 1024);
@@ -503,31 +371,38 @@ void TaskDoiWifi(void *param)
       vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    bool ghiThanhCong = false;
-    if (Firebase.ready())
+    if (!Firebase.ready())
     {
-      ghiThanhCong = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thanhCong");
-      ghiThanhCong &= Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/ssidHienTai"), newSsid);
-      Serial.printf("[WiFi-Task] Ghi Firebase %s\n", ghiThanhCong ? "OK" : "THAT BAI");
+      Serial.println("[Firebase] Firebase KHONG san sang sau khi doi WiFi, van thu ghi...");
+    }
+
+    bool okTrangThai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thanhCong");
+    if (!okTrangThai)
+    {
+      Serial.printf("[Firebase] LOI ghi /WiFi/trangThai: %s\n", wifiTaskData.errorReason().c_str());
+      vTaskDelay(pdMS_TO_TICKS(500));
+      okTrangThai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thanhCong");
+      if (!okTrangThai)
+        Serial.printf("[Firebase] LOI lan 2 ghi /WiFi/trangThai: %s\n", wifiTaskData.errorReason().c_str());
+      else
+        Serial.println("[Firebase] Ghi /WiFi/trangThai thanh cong o lan thu 2!");
     }
     else
     {
-      Serial.println("[WiFi-Task] Firebase chua san sang, se ghi lai sau khi restart");
+      Serial.println("[Firebase] Da ghi /WiFi/trangThai = thanhCong");
     }
-
-    if (hTaskScanLED != NULL)
-      vTaskSuspend(hTaskScanLED);
 
     preferences.begin("WiFiCfg", false);
     preferences.putString("ssid", newSsid);
     preferences.putString("pass", newPass);
     preferences.end();
 
-    if (hTaskScanLED != NULL)
-      vTaskResume(hTaskScanLED);
-
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    ESP.restart();
+    wifiSSID = newSsid;
+    wifiPassword = newPass;
+    WiFi.setAutoReconnect(true);
+    GhiWifiHienTaiLenFirebase();
+    TimeCheckWifi = millis();
+    Serial.println("[WiFi-Task] Da ap dung WiFi moi, khong can restart ESP.");
   }
   else
   {
@@ -547,43 +422,19 @@ void TaskDoiWifi(void *param)
     while (WiFi.status() != WL_CONNECTED && millis() - t2 < 10000)
       vTaskDelay(pdMS_TO_TICKS(300));
 
-    if (Firebase.ready())
-    {
-      FirebaseData wifiTaskData;
-      wifiTaskData.setBSSLBufferSize(4096, 1024);
-      Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thatBai");
-    }
+    FirebaseData wifiTaskData;
+    wifiTaskData.setBSSLBufferSize(4096, 1024);
+    bool okThatBai = Firebase.RTDB.setString(&wifiTaskData, F("/WiFi/trangThai"), "thatBai");
+    if (!okThatBai)
+      Serial.printf("[Firebase] LOI ghi /WiFi/trangThai=thatBai: %s\n", wifiTaskData.errorReason().c_str());
 
     WiFi.setAutoReconnect(true);
     TimeCheckWifi = millis();
-
-    if (WiFi.status() != WL_CONNECTED)
-    {
-
-      if (bleDangPhat)
-      {
-        BLEDevice::startAdvertising();
-        Serial.println("[BLE] Khoi dong lai advertising du phong.");
-      }
-      else
-      {
-        BatBLEMode();
-      }
-    }
   }
 
   yeuCauDoiWifi = false;
   taskDoiWifiDangChay = false;
   vTaskDelete(NULL);
-}
-
-void XuLyDoiWifiTuBLE()
-{
-  if (yeuCauDoiWifi && !taskDoiWifiDangChay)
-  {
-    taskDoiWifiDangChay = true;
-    xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifiBLE", 8192, NULL, 1, NULL, 1);
-  }
 }
 
 void XuLyWifiFirebase()
@@ -593,7 +444,7 @@ void XuLyWifiFirebase()
 
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (millis() - TimeCheckWifi < CHU_KY_WIFI_CAPNHAT_MS && TimeCheckWifi != 0)
+  if (millis() - TimeCheckWifi < 10000 && TimeCheckWifi != 0)
     return;
   TimeCheckWifi = millis();
 
@@ -617,6 +468,7 @@ void XuLyWifiFirebase()
   Serial.printf("[WiFi] Nhan lenh doi WiFi: ssid='%s'\n", newSsid.c_str());
 
   Firebase.RTDB.setBool(&Data, F("/WiFi/capNhat"), false);
+  Firebase.RTDB.deleteNode(&Data, F("/WiFi/password"));
   Firebase.RTDB.setString(&Data, F("/WiFi/trangThai"), "dangKetNoi");
 
   pendingSsid = newSsid;
@@ -624,7 +476,12 @@ void XuLyWifiFirebase()
   yeuCauDoiWifi = true;
   taskDoiWifiDangChay = true;
 
-  xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifi", 20480, NULL, 1, NULL, 1);
+  if (xTaskCreatePinnedToCore(TaskDoiWifi, "TaskDoiWifi", 16384, NULL, 1, NULL, 1) != pdPASS)
+  {
+    yeuCauDoiWifi = false;
+    taskDoiWifiDangChay = false;
+    Serial.println("[WiFi-Task] LOI: khong tao duoc task doi WiFi");
+  }
 }
 
 String JsonEscape(const String &s)
@@ -720,42 +577,25 @@ void TaskQuetWifi(void *param)
     }
   }
 
+  Serial.printf("[WiFi-Scan] Tim thay %d mang, gui %d mang (da loc trung, bo %d mang SSID hong) len Firebase\n",
+                soMang, soDaThem, soBiLoc);
+
   WiFi.scanDelete();
 
-  Serial.printf("[WiFi-Scan] Tim thay %d mang, gui %d mang len Firebase\n", soMang, soDaThem);
+  FirebaseData scanData;
+  scanData.setBSSLBufferSize(4096, 1024);
 
-  if (Firebase.ready())
-  {
-
-    FirebaseData scanData;
-    scanData.setBSSLBufferSize(4096, 4096);
-
-    bool okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
-    if (!okList)
-    {
-      Serial.printf("[Firebase] LOI ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
-      vTaskDelay(pdMS_TO_TICKS(300));
-      okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
-      if (!okList)
-        Serial.printf("[Firebase] LOI lan 2 ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
-      else
-        Serial.println("[Firebase] Ghi /WiFi/danhSachWifi thanh cong o lan thu 2!");
-    }
-    else
-    {
-      Serial.println("[Firebase] Da ghi /WiFi/danhSachWifi thanh cong!");
-    }
-
-    FirebaseData flagData;
-    flagData.setBSSLBufferSize(2048, 1024);
-    bool okFlag = Firebase.RTDB.setBool(&flagData, F("/WiFi/quetLuoi"), false);
-    if (!okFlag)
-      Serial.printf("[Firebase] LOI ghi /WiFi/quetLuoi=false: %s\n", flagData.errorReason().c_str());
-  }
+  bool okList = Firebase.RTDB.setArray(&scanData, F("/WiFi/danhSachWifi"), &dsMangArr);
+  if (!okList)
+    Serial.printf("[Firebase] LOI ghi /WiFi/danhSachWifi: %s\n", scanData.errorReason().c_str());
   else
-  {
-    Serial.println("[Firebase] Firebase chua san sang, bo qua ghi ket qua quet lan nay.");
-  }
+    Serial.println("[Firebase] Da ghi /WiFi/danhSachWifi thanh cong!");
+
+  bool okFlag = Firebase.RTDB.setBool(&scanData, F("/WiFi/quetLuoi"), false);
+  if (!okFlag)
+    Serial.printf("[Firebase] LOI ghi /WiFi/quetLuoi=false: %s\n", scanData.errorReason().c_str());
+
+  Serial.println("[WiFi-Scan] Hoan tat, da gui danh sach len Firebase.");
 
   dangQuetWifi = false;
   vTaskDelete(NULL);
@@ -768,7 +608,7 @@ void XuLyQuetWifiFirebase()
 
   if (yeuCauDoiWifi || dangQuetWifi)
     return;
-  if (millis() - TimeCheckQuetWifi < CHU_KY_QUET_WIFI_MS && TimeCheckQuetWifi != 0)
+  if (millis() - TimeCheckQuetWifi < 2000 && TimeCheckQuetWifi != 0)
     return;
   TimeCheckQuetWifi = millis();
 
@@ -780,9 +620,14 @@ void XuLyQuetWifiFirebase()
   if (!capNhat)
     return;
 
+  Serial.println("[WiFi] Nhan lenh quet mang WiFi lan can tu app");
   dangQuetWifi = true;
 
-  xTaskCreatePinnedToCore(TaskQuetWifi, "TaskQuetWifi", 20480, NULL, 1, NULL, 1);
+  if (xTaskCreatePinnedToCore(TaskQuetWifi, "TaskQuetWifi", 12288, NULL, 1, NULL, 1) != pdPASS)
+  {
+    dangQuetWifi = false;
+    Serial.println("[WiFi-Scan] LOI: khong tao duoc task quet WiFi");
+  }
 }
 
 void VeDauPhanTram(int ox, int oy)
@@ -836,7 +681,8 @@ void KhoiTaoManHinhLED()
   dmd.clearScreen(true);
   dmd.selectFont(System5x7);
 
-  xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore, "InitScanLED", 2048, NULL, configMAX_PRIORITIES, NULL, 1);
+  if (xTaskCreatePinnedToCore(TaskKhoiTaoNgatCore, "InitScanLED", 2048, NULL, configMAX_PRIORITIES, NULL, 1) != pdPASS)
+    Serial.println("[LED] LOI: khong tao duoc task khoi tao ngat");
 }
 
 void KiemTraLaiRTC()
@@ -856,28 +702,32 @@ void KiemTraLaiRTC()
 
 void TaskKetNoiWifiBanDau(void *param)
 {
-  WiFi.mode(WIFI_STA);
-  DocWifiTuFlash();
-  Serial.printf("[WiFi] SSID: %s\n", wifiSSID.c_str());
-  WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-  WiFi.setAutoReconnect(false);
+  for (;;)
+  {
+    WiFi.mode(WIFI_STA);
+    DocWifiTuFlash();
+    Serial.printf("[WiFi] SSID: %s\n", wifiSSID.c_str());
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    WiFi.setAutoReconnect(false);
 
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < 10000)
-  {
-    vTaskDelay(pdMS_TO_TICKS(200));
-  }
+    unsigned long t = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t < 10000)
+      vTaskDelay(pdMS_TO_TICKS(200));
 
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("\n[WiFi] Da ket noi WiFi thanh cong!");
-    WiFi.setAutoReconnect(true);
-    KichHoatCauHinhFirebase();
-  }
-  else
-  {
-    Serial.println("\n[WiFi] Ket noi that bai! Dang mo Bluetooth Server de du phong...");
-    BatBLEMode();
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      Serial.println("\n[WiFi] Da ket noi WiFi thanh cong!");
+      WiFi.setAutoReconnect(true);
+      KichHoatCauHinhFirebase();
+      break;
+    }
+
+    Serial.println("\n[WiFi] Ket noi that bai! Bat AP Mode de cau hinh (chay nen, khong chan he thong).");
+    if (BatAPMode())
+      break;
+
+    Serial.println("[WiFi] AP timeout, se thu ket noi lai sau 5 giay.");
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 
   vTaskDelete(NULL);
@@ -910,20 +760,21 @@ void setup()
 
   Data.setBSSLBufferSize(4096, 1024);
 
-  xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 12288, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 12288, NULL, 1, NULL, 0);
+  if (xTaskCreatePinnedToCore(TaskKetNoiWifiBanDau, "WifiInitTask", 16384, NULL, 1, NULL, 1) != pdPASS)
+    Serial.println("[WiFi] LOI: khong tao duoc task khoi tao WiFi");
+  if (xTaskCreatePinnedToCore(TaskMatrixPanel, "TaskMatrixPanel", 4096, NULL, 2, NULL, 1) != pdPASS)
+    Serial.println("[LED] LOI: khong tao duoc task hien thi");
+  if (xTaskCreatePinnedToCore(TaskDocDHT, "TaskDocDHT", 16384, NULL, 1, NULL, 0) != pdPASS)
+    Serial.println("[DHT] LOI: khong tao duoc task doc DHT");
 }
 
 void loop()
 {
-  XuLyDoiWifiTuBLE();
-  ThuKetNoiLaiWiFi();
-  KiemTraMatKetNoiWifi();
-  KiemTraMatMangLau();
+  TheoDoiTrangThaiWiFi();
+  XuLyDongBoSsidFirebase();
   KiemTraLaiRTC();
 
-  if (WiFi.status() == WL_CONNECTED && !firebaseDaKhoiTao && !yeuCauDoiWifi && !dangQuetWifi && !bleDangPhat && !bleDangTat)
+  if (WiFi.status() == WL_CONNECTED && !firebaseDaKhoiTao && !yeuCauDoiWifi && !dangQuetWifi)
   {
     KichHoatCauHinhFirebase();
   }
@@ -969,13 +820,16 @@ void loop()
     buocFirebase = 8;
     break;
   case 8:
-    GuiHeartbeatFirebase();
+    XuLyDinhDangGioFirebase();
     buocFirebase = 0;
     break;
   default:
     buocFirebase = 0;
     break;
   }
+
+  XuLyAPMode();
+  vTaskDelay(1);
 }
 
 void IRAM_ATTR triggerScan()
@@ -1027,14 +881,13 @@ void TaskDocDHT(void *param)
 
     if (dhtDaOnDinh && (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0))
     {
-      if (yeuCauDoiWifi || dangQuetWifi || taskDoiWifiDangChay || bleDangPhat)
+      if (yeuCauDoiWifi || dangQuetWifi || taskDoiWifiDangChay)
       {
-        SafePrintln("[DHT] Bo qua lan doc, RF dang ban, se thu lai sau");
+        SafePrintln("[DHT] Bo qua lan doc, RF mode dang ban, se thu lai sau");
       }
       else
       {
         TimeDocDHT = millis();
-
         docDHT = true;
 
         const uint8_t SO_LAN_THU_LAI_TOI_DA = 2;
@@ -1073,23 +926,22 @@ void TaskDocDHT(void *param)
       }
     }
 
-    if (canGuiDHTLenFirebase &&
-        !yeuCauDoiWifi &&
-        !dangQuetWifi &&
-        firebaseDaKhoiTao &&
-        Firebase.ready())
+    if (canGuiDHTLenFirebase && !yeuCauDoiWifi && !dangQuetWifi && firebaseDaKhoiTao)
     {
-      FirebaseJson json;
-      json.set("NhietDo", tempChoGui);
-      json.set("DoAm", humiChoGui);
+      if (Firebase.ready())
+      {
+        FirebaseJson json;
+        json.set("NhietDo", tempChoGui);
+        json.set("DoAm", humiChoGui);
 
-      if (Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json))
-      {
-        canGuiDHTLenFirebase = false;
-      }
-      else
-      {
-        SafePrintln("[DHT] Gui Firebase that bai: " + dhtData.errorReason() + ", se thu lai");
+        if (Firebase.RTDB.updateNode(&dhtData, F("/CamBien"), &json))
+        {
+          canGuiDHTLenFirebase = false;
+        }
+        else
+        {
+          SafePrintln("[DHT] Gui Firebase that bai: " + dhtData.errorReason() + ", se thu lai");
+        }
       }
     }
 
@@ -1113,19 +965,52 @@ void KichHoatCauHinhFirebase()
 
   if (!taskDocBaoThucDaTao)
   {
-    taskDocBaoThucDaTao = true;
-    xTaskCreatePinnedToCore(TaskDocBaoThucFirebase, "TaskDocBaoThuc", 12288, NULL, 1, NULL, 1);
+    if (xTaskCreatePinnedToCore(TaskDocBaoThucFirebase, "TaskDocBaoThuc", 16384, NULL, 1, NULL, 1) == pdPASS)
+      taskDocBaoThucDaTao = true;
+    else
+      Serial.println("[Firebase] LOI: khong tao duoc task doc bao thuc");
   }
 }
 
-void GhiWifiHienTaiLenFirebase()
+bool GhiWifiHienTaiLenFirebase()
 {
   if (!firebaseDaKhoiTao || !Firebase.ready())
-    return;
+  {
+    ssidCanDongBoFirebase = true;
+    return false;
+  }
   String ssidHienTai = WiFi.SSID();
   if (ssidHienTai.length() == 0)
+  {
+    ssidCanDongBoFirebase = true;
+    return false;
+  }
+
+  FirebaseData ssidData;
+  ssidData.setBSSLBufferSize(4096, 1024);
+  bool daGhi = Firebase.RTDB.setString(&ssidData, F("/WiFi/ssidHienTai"), ssidHienTai);
+  if (!daGhi)
+  {
+    ssidCanDongBoFirebase = true;
+    Serial.printf("[Firebase] LOI ghi /WiFi/ssidHienTai: %s, se thu lai\n", ssidData.errorReason().c_str());
+  }
+  else
+  {
+    ssidCanDongBoFirebase = false;
+    Serial.printf("[Firebase] Da cap nhat /WiFi/ssidHienTai = %s\n", ssidHienTai.c_str());
+  }
+  return daGhi;
+}
+
+void XuLyDongBoSsidFirebase()
+{
+  if (!ssidCanDongBoFirebase)
     return;
-  Firebase.RTDB.setString(&Data, F("/WiFi/ssidHienTai"), ssidHienTai);
+  if (millis() - TimeThuLaiSsidFirebase < 3000 && TimeThuLaiSsidFirebase != 0)
+    return;
+
+  TimeThuLaiSsidFirebase = millis();
+  GhiWifiHienTaiLenFirebase();
 }
 
 void DocBaoThucTuFlash()
@@ -1216,6 +1101,10 @@ bool TatBaoThucMotLan(int index)
 {
   if (index < 0 || index >= MAX_BAO_THUC)
     return false;
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return false;
+  if (!firebaseDaKhoiTao || !Firebase.ready())
+    return false;
   String basePath = "/DongHo/dsBaoThuc/BaoThuc" + String(index + 1);
   return Firebase.RTDB.setBool(&Data, basePath + "/active", false);
 }
@@ -1242,11 +1131,9 @@ void DongHo(DateTime now)
   {
     TimeDocDS3231 = millis();
     static bool daGhiWifi = false;
+
     if (!daGhiWifi)
-    {
-      GhiWifiHienTaiLenFirebase();
-      daGhiWifi = true;
-    }
+      daGhiWifi = GhiWifiHienTaiLenFirebase();
 
     FirebaseJson json;
     json.set("GioGiac/Gio", now.hour());
@@ -1581,9 +1468,32 @@ void XuLyThoiGianReoFirebase()
   }
 }
 
+void XuLyDinhDangGioFirebase()
+{
+  if (yeuCauDoiWifi || dangQuetWifi)
+    return;
+  if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDinhDangGio > CHU_KY_DINH_DANG_GIO_MS || TimeCheckDinhDangGio == 0))
+  {
+    TimeCheckDinhDangGio = millis();
+    if (Firebase.RTDB.getBool(&Data, F("/DongHo/DinhDang24Gio")))
+    {
+      bool la24Gio = Data.boolData();
+      static int8_t truocDo = -1;
+      if ((int8_t)la24Gio != truocDo)
+      {
+        truocDo = (int8_t)la24Gio;
+        DinhDang24Gio = la24Gio;
+      }
+    }
+    else
+    {
+      SafePrintln("[DinhDangGio] Doc that bai: " + Data.errorReason());
+    }
+  }
+}
+
 void TaskKhoiTaoNgatCore(void *ThamSo)
 {
-
   xTaskCreatePinnedToCore(TaskScanLED, "TaskScanLED", 4096, NULL, 5, &hTaskScanLED, 1);
   uint8_t cpuClock = ESP.getCpuFreqMHz();
   timer = timerBegin(0, cpuClock, true);
@@ -1674,8 +1584,6 @@ uint8_t KiemTraTrangThaiIconBaoThuc(DateTime now)
   }
   xSemaphoreGive(baoThucMutex);
 
-  // 0: khong co bao thuc nao sap reo
-  // 1: sap reo trong vong 10 phut (icon nhap nhay thay cho dau hai cham)
   trangThaiGanNhat = sapReoTrong10Phut ? 1 : 0;
   return trangThaiGanNhat;
 }
@@ -1699,7 +1607,6 @@ void MatrixPanel()
   static int8_t doAmTruocDo = -1;
   static uint8_t trangThaiBaoThucTruocDo = 99;
   uint8_t trangThaiBaoThuc = KiemTraTrangThaiIconBaoThuc(now);
-  // uint8_t dichTraiIcon = (trangThaiBaoThuc != 0) ? 3 : 0;
   const uint8_t iconDongHo_X = 27;
   const uint8_t iconDongHo_Y = 2;
   static unsigned long thoiGianToggle = 0;
@@ -1766,7 +1673,14 @@ void MatrixPanel()
     dmd.selectFont(System5x7);
     char TextGio[5];
     char TextPhut[5];
-    sprintf(TextGio, "%02d", Gio);
+    uint8_t gioHienThi = Gio;
+    if (!DinhDang24Gio)
+    {
+      gioHienThi = Gio % 12;
+      if (gioHienThi == 0)
+        gioHienThi = 12;
+    }
+    sprintf(TextGio, "%02d", gioHienThi);
     sprintf(TextPhut, "%02d", Phut);
     dmd.drawString(3, 0, TextGio, 2, GRAPHICS_NORMAL);
     dmd.drawString(19, 0, TextPhut, 2, GRAPHICS_NORMAL);
