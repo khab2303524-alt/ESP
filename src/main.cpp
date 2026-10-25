@@ -7,8 +7,8 @@
 #include <DMD32.h>
 #include <Preferences.h>
 #include <WebServer.h>
-#include "soc/soc.h"          // Brownout disable
-#include "soc/rtc_cntl_reg.h" // Brownout disable
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 #include "fonts/SystemFont5x7.h"
 
 #define SSID_DEFAULT "Kha"
