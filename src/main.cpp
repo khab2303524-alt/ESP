@@ -34,6 +34,7 @@
 #define CHU_KY_DINH_DANG_GIO_MS 900UL
 #define CHU_KY_DOC_BAO_THUC_MS 4000UL
 #define CHU_KY_DOC_DHT_MS 15000UL
+#define THOI_GIAN_CHO_CAM_BIEN_MS 180000UL // 3 phut cho cam bien DHT on dinh & cho phep ket noi Wi-Fi/App
 
 FirebaseData Data;
 FirebaseAuth Auth;
@@ -75,6 +76,9 @@ unsigned long TimeCheckDoSang = 0;
 
 bool dhtDaOnDinh = false;
 unsigned long thoiGianKhoiDongDht = 0;
+volatile bool choPhepKetNoiWifi = true;  // Chi cho phep ket noi Wi-Fi luc moi mo dien (den chop tat)
+volatile bool wifiDaTatHoanToan = false; // Danh dau da ngat va tat Wi-Fi hoan toan
+uint8_t doSangHienTai = 150;             // Do sang LED (0-255)
 
 int8_t phutcuoicung = -1;
 int8_t NhietDo = 0;
@@ -171,6 +175,9 @@ void XuLyChuongThuCongFirebase();
 void TaskMatrixPanel(void *param);
 void TaskDocBaoThucFirebase(void *param);
 void TaskDocDHT(void *param);
+void DocCaiDatTuFlash();
+void LuuCaiDatVaoFlash();
+void TatWiFiHoanToan();
 
 void DocWifiTuFlash()
 {
@@ -221,6 +228,9 @@ const char *TenTrangThaiWiFi(uint8_t trangThai)
 
 void TheoDoiTrangThaiWiFi()
 {
+  if (!choPhepKetNoiWifi)
+    return;
+
   static int trangThaiCu = -1;
   uint8_t trangThaiMoi = WiFi.status();
 
@@ -334,8 +344,49 @@ void HandlePostWifi()
                 apSsidMoi.c_str(), apSsidMoi.length(), apPassMoi.c_str(), apPassMoi.length());
 }
 
+void TatWiFiHoanToan()
+{
+  if (wifiDaTatHoanToan)
+    return;
+  wifiDaTatHoanToan = true;
+  choPhepKetNoiWifi = false;
+
+  SafePrintln("\n========================================================");
+  SafePrintln("[WiFi] HET GIAI DOAN KHOI DONG (CAM BIEN DA ON DINH).");
+  SafePrintln("[WiFi] DANG NGAT KET NOI VA TAT WI-FI RADIO HOAN TOAN...");
+  SafePrintln("========================================================");
+
+  // Thong bao trang thai len Firebase truoc khi tat Wi-Fi (neu dang ket noi)
+  if (firebaseDaKhoiTao && Firebase.ready())
+  {
+    Firebase.RTDB.setString(&Data, F("/DongHo/TrangThaiWiFi"), "DA_TAT");
+  }
+
+  // Tat WebServer va SoftAP neu dang mo
+  if (apDangHoatDong)
+  {
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    apDangHoatDong = false;
+    SafePrintln("[AP] Da tat WebServer va SoftAP.");
+  }
+
+  // Dung Firebase tu dong ket noi lai
+  Firebase.reconnectWiFi(false);
+
+  // Ngat ket noi STA va tat radio Wi-Fi hoan toan
+  WiFi.disconnect(true, false);
+  vTaskDelay(pdMS_TO_TICKS(100));
+  WiFi.mode(WIFI_OFF);
+
+  SafePrintln("[WiFi] Da tat Wi-Fi hoan toan! Bang den chuyen sang che do chay doc lap (offline).");
+  SafePrintln("[WiFi] De ket noi lai voi App: Vui long tat nguon va bat lai bang den.");
+}
+
 void BatAPServer()
 {
+  if (!choPhepKetNoiWifi)
+    return;
   if (apDangHoatDong)
     return;
   Serial.println("[AP] Bat AP Mode 'LED_P10' va khoi dong WebServer...");
@@ -364,7 +415,7 @@ void BatAPServer()
 
 void XuLyAPServer()
 {
-  if (!apDangHoatDong)
+  if (!apDangHoatDong || !choPhepKetNoiWifi)
     return;
 
   server.handleClient();
@@ -396,7 +447,7 @@ void XuLyAPServer()
     return;
   }
 
-  // Timeout 5 phut AP mode neu khong ai cau hinh -> restart de thu lai WiFi trong flash
+  // Timeout AP mode neu khong ai cau hinh
   if (millis() - thoiDiemBatDauAP > AP_TIMEOUT_MS)
   {
     Serial.println("[AP] Het thoi gian cho AP, khoi dong lai ESP32 de thu ket noi lai...");
@@ -504,12 +555,18 @@ void TaskKetNoiWifiBanDau(void *param)
     WiFi.setAutoReconnect(true);
 
     unsigned long t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < 15000)
+    while (choPhepKetNoiWifi && WiFi.status() != WL_CONNECTED && millis() - t < 15000)
     {
       vTaskDelay(pdMS_TO_TICKS(500));
       Serial.print(".");
     }
     Serial.println();
+
+    if (!choPhepKetNoiWifi)
+    {
+      vTaskDelete(NULL);
+      return;
+    }
 
     if (WiFi.status() == WL_CONNECTED)
     {
@@ -518,25 +575,31 @@ void TaskKetNoiWifiBanDau(void *param)
     }
     else
     {
-      // Ket noi STA that bai -> bat AP de cau hinh lai
-      Serial.println("[WiFi] Ket noi STA that bai. Bat AP de cho cau hinh lai...");
-      BatAPServer();
+      // Ket noi STA that bai -> bat AP de cho cau hinh lai (neu con trong thoi gian cho phep)
+      if (choPhepKetNoiWifi)
+      {
+        Serial.println("[WiFi] Ket noi STA that bai. Bat AP de cho cau hinh lai...");
+        BatAPServer();
+      }
     }
   }
   else
   {
-    // Chua co WiFi trong flash -> phat AP ngay
-    Serial.println("[WiFi] Chua co WiFi trong flash, bat AP de cau hinh...");
-    BatAPServer();
+    // Chua co WiFi trong flash -> phat AP ngay (neu con trong thoi gian cho phep)
+    if (choPhepKetNoiWifi)
+    {
+      Serial.println("[WiFi] Chua co WiFi trong flash, bat AP de cau hinh...");
+      BatAPServer();
+    }
   }
 
-  // Vong lap giu ket noi + xu ly mat mang
-  for (;;)
+  // Vong lap giu ket noi + xu ly mat mang trong giai doan cho phep Wi-Fi
+  while (choPhepKetNoiWifi)
   {
     if (!apDangHoatDong && WiFi.status() != WL_CONNECTED)
     {
       vTaskDelay(pdMS_TO_TICKS(15000));
-      if (!apDangHoatDong && WiFi.status() != WL_CONNECTED)
+      if (choPhepKetNoiWifi && !apDangHoatDong && WiFi.status() != WL_CONNECTED)
       {
         Serial.printf("[WiFi] Thu ket noi lai: %s\n", wifiSSID.c_str());
         WiFi.disconnect();
@@ -545,6 +608,9 @@ void TaskKetNoiWifiBanDau(void *param)
     }
     vTaskDelay(pdMS_TO_TICKS(3000));
   }
+
+  Serial.println("[WifiInitTask] Task ket noi Wi-Fi da ket thuc.");
+  vTaskDelete(NULL);
 }
 
 void setup()
@@ -577,6 +643,7 @@ void setup()
   prefMutex = xSemaphoreCreateMutex();
   KhoiTaoManHinhLED();
   DocBaoThucTuFlash();
+  DocCaiDatTuFlash();
 
   if (!rtc.begin())
   {
@@ -608,49 +675,63 @@ void setup()
 
 void loop()
 {
-  TheoDoiTrangThaiWiFi();
-  XuLyDongBoSsidFirebase();
   KiemTraLaiRTC();
-  XuLyAPServer();
-
-  if (WiFi.status() == WL_CONNECTED && !firebaseDaKhoiTao && !apDangHoatDong)
-  {
-    KichHoatCauHinhFirebase();
-  }
 
   DateTime now = rtcOk ? rtc.now() : DateTime((uint32_t)0);
   BaoThuc(now);
   KiemTraTatChuong();
   DongHo(now);
-  XuLyDatGioFirebase();
-  XuLyDinhDangGioFirebase();
 
-  static uint8_t buocFirebase = 0;
-  switch (buocFirebase)
+  if (choPhepKetNoiWifi)
   {
-  case 0:
-    XuLyDocBaoThucFirebase();
-    buocFirebase = 1;
-    break;
-  case 1:
-    XuLyDatNgayFirebase();
-    buocFirebase = 2;
-    break;
-  case 2:
-    XuLyDoSangFirebase();
-    buocFirebase = 3;
-    break;
-  case 3:
-    XuLyThoiGianReoFirebase();
-    buocFirebase = 4;
-    break;
-  case 4:
-    XuLyChuongThuCongFirebase();
-    buocFirebase = 0;
-    break;
-  default:
-    buocFirebase = 0;
-    break;
+    // Kiem tra het thoi gian cho cam bien / khoi dong
+    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > THOI_GIAN_CHO_CAM_BIEN_MS))
+    {
+      dhtDaOnDinh = true;
+      TatWiFiHoanToan();
+    }
+    else
+    {
+      TheoDoiTrangThaiWiFi();
+      XuLyDongBoSsidFirebase();
+      XuLyAPServer();
+
+      if (WiFi.status() == WL_CONNECTED && !firebaseDaKhoiTao && !apDangHoatDong)
+      {
+        KichHoatCauHinhFirebase();
+      }
+
+      XuLyDatGioFirebase();
+      XuLyDinhDangGioFirebase();
+
+      static uint8_t buocFirebase = 0;
+      switch (buocFirebase)
+      {
+      case 0:
+        XuLyDocBaoThucFirebase();
+        buocFirebase = 1;
+        break;
+      case 1:
+        XuLyDatNgayFirebase();
+        buocFirebase = 2;
+        break;
+      case 2:
+        XuLyDoSangFirebase();
+        buocFirebase = 3;
+        break;
+      case 3:
+        XuLyThoiGianReoFirebase();
+        buocFirebase = 4;
+        break;
+      case 4:
+        XuLyChuongThuCongFirebase();
+        buocFirebase = 0;
+        break;
+      default:
+        buocFirebase = 0;
+        break;
+      }
+    }
   }
 
   vTaskDelay(pdMS_TO_TICKS(10));
@@ -701,10 +782,11 @@ void TaskDocDHT(void *param)
 
   for (;;)
   {
-    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > 180000UL))
+    if (!dhtDaOnDinh && (millis() - thoiGianKhoiDongDht > THOI_GIAN_CHO_CAM_BIEN_MS))
     {
       dhtDaOnDinh = true;
-      Serial.println("[DHT] Da on dinh");
+      Serial.println("[DHT] Da on dinh! Bat dau hien thi nhiet do / do am.");
+      TatWiFiHoanToan();
     }
 
     if (dhtDaOnDinh && (millis() - TimeDocDHT > CHU_KY_DOC_DHT_MS || TimeDocDHT == 0))
@@ -751,7 +833,7 @@ void TaskDocDHT(void *param)
       }
     }
 
-    if (canGuiDHTLenFirebase && !apDangHoatDong && firebaseDaKhoiTao)
+    if (choPhepKetNoiWifi && canGuiDHTLenFirebase && !apDangHoatDong && firebaseDaKhoiTao)
     {
       if (Firebase.ready())
       {
@@ -776,6 +858,9 @@ void TaskDocDHT(void *param)
 
 void KichHoatCauHinhFirebase()
 {
+  if (!choPhepKetNoiWifi)
+    return;
+
   if (!firebaseDaKhoiTao)
   {
     Config.api_key = API_KEY;
@@ -786,12 +871,13 @@ void KichHoatCauHinhFirebase()
     Firebase.reconnectWiFi(true);
     firebaseDaKhoiTao = true;
     Serial.println("[Firebase] Da kich hoat cau hinh Firebase an toan!");
+    Firebase.RTDB.setString(&Data, F("/DongHo/TrangThaiWiFi"), "CHO_PHEP");
   }
 
-  if (!taskDocBaoThucDaTao)
+  if (!taskDocBaoThucDaTao && choPhepKetNoiWifi)
   {
     if (xTaskCreatePinnedToCore(TaskDocBaoThucFirebase, "TaskDocBaoThuc", 12288, NULL, 1, NULL, 1) == pdPASS)
-      taskDocBaoThucDaTao = true; // Stack tăng 8192->12288 (Firebase JSON 50 báo thức + SSL)
+      taskDocBaoThucDaTao = true; // Stack 12288 (Firebase JSON 50 báo thức + SSL)
     else
       Serial.println("[Firebase] LOI: khong tao duoc task doc bao thuc");
   }
@@ -836,6 +922,8 @@ bool GhiWifiHienTaiLenFirebase()
 
 void XuLyDongBoSsidFirebase()
 {
+  if (apDangHoatDong || !choPhepKetNoiWifi)
+    return;
   if (!ssidCanDongBoFirebase)
     return;
   if (millis() - TimeThuLaiSsidFirebase < 3000 && TimeThuLaiSsidFirebase != 0)
@@ -885,6 +973,38 @@ void LuuBaoThucVaoFlash()
     xSemaphoreGive(prefMutex);
 }
 
+void DocCaiDatTuFlash()
+{
+  if (prefMutex != NULL)
+    xSemaphoreTake(prefMutex, portMAX_DELAY);
+  preferences.begin("CaiDatNS", true);
+  doSangHienTai = preferences.getUChar("doSang", 150);
+  ThoiGianReoGiay = preferences.getUShort("thoiGianReo", 5);
+  DinhDang24Gio = preferences.getBool("dinhDang24h", true);
+  preferences.end();
+  if (prefMutex != NULL)
+    xSemaphoreGive(prefMutex);
+
+  dmd.setBrightness(doSangHienTai);
+  Serial.printf("[Flash] Doc cai dat: DoSang=%u, ThoiGianReo=%u giay, DinhDang=%s\n",
+                doSangHienTai, ThoiGianReoGiay, DinhDang24Gio ? "24h" : "12h");
+}
+
+void LuuCaiDatVaoFlash()
+{
+  if (prefMutex != NULL)
+    xSemaphoreTake(prefMutex, portMAX_DELAY);
+  TamDungQuetLED();
+  preferences.begin("CaiDatNS", false);
+  preferences.putUChar("doSang", doSangHienTai);
+  preferences.putUShort("thoiGianReo", ThoiGianReoGiay);
+  preferences.putBool("dinhDang24h", DinhDang24Gio);
+  preferences.end();
+  TiepTucQuetLED();
+  if (prefMutex != NULL)
+    xSemaphoreGive(prefMutex);
+}
+
 uint8_t DocThuMaskTuFirebase(FirebaseJson &json, const String &pathThu)
 {
   FirebaseJsonData resultThu;
@@ -912,7 +1032,7 @@ bool TatBaoThucMotLan(int index)
 {
   if (index < 0 || index >= MAX_BAO_THUC)
     return false;
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return false;
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return false;
@@ -932,7 +1052,7 @@ void DongHo(DateTime now)
 {
   if (!rtcOk)
     return;
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
   {
     Gio = now.hour();
     Phut = now.minute();
@@ -1047,7 +1167,7 @@ void KiemTraTatChuong()
 
 void XuLyDocBaoThucFirebase()
 {
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return;
   if (!baoThucCanDongBoFirebase)
     return;
@@ -1086,7 +1206,7 @@ void TaskDocBaoThucFirebase(void *param)
 
   const TickType_t KHOANG_NGHI = pdMS_TO_TICKS(CHU_KY_DOC_BAO_THUC_MS);
 
-  for (;;)
+  while (choPhepKetNoiWifi)
   {
     if (!apDangHoatDong && firebaseDaKhoiTao && Firebase.ready())
     {
@@ -1152,11 +1272,15 @@ void TaskDocBaoThucFirebase(void *param)
     }
     vTaskDelay(KHOANG_NGHI);
   }
+
+  Serial.println("[TaskDocBaoThuc] Da ngung task doc bao thuc vi Wi-Fi da tat.");
+  taskDocBaoThucDaTao = false;
+  vTaskDelete(NULL);
 }
 
 void XuLyDatNgayFirebase()
 {
-  if (apDangHoatDong || !rtcOk)
+  if (apDangHoatDong || !rtcOk || !choPhepKetNoiWifi)
     return;
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatNgay > CHU_KY_DAT_NGAY_MS || TimeCheckDatNgay == 0))
   {
@@ -1192,7 +1316,7 @@ void XuLyDatNgayFirebase()
 
 void XuLyDatGioFirebase()
 {
-  if (apDangHoatDong || !rtcOk)
+  if (apDangHoatDong || !rtcOk || !choPhepKetNoiWifi)
     return;
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDatGio > CHU_KY_DAT_GIO_MS || TimeCheckDatGio == 0))
   {
@@ -1231,7 +1355,7 @@ void XuLyDatGioFirebase()
 
 void XuLyDoSangFirebase()
 {
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return;
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDoSang > CHU_KY_DO_SANG_MS || TimeCheckDoSang == 0))
   {
@@ -1244,7 +1368,9 @@ void XuLyDoSangFirebase()
       if (doSang != doSangTruocDo)
       {
         doSangTruocDo = doSang;
-        dmd.setBrightness((uint8_t)doSang);
+        doSangHienTai = (uint8_t)doSang;
+        dmd.setBrightness(doSangHienTai);
+        LuuCaiDatVaoFlash();
       }
     }
     else
@@ -1256,7 +1382,7 @@ void XuLyDoSangFirebase()
 
 void XuLyThoiGianReoFirebase()
 {
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return;
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckThoiGianReo > CHU_KY_THOI_GIAN_REO_MS || TimeCheckThoiGianReo == 0))
   {
@@ -1270,6 +1396,7 @@ void XuLyThoiGianReoFirebase()
       {
         giayTruocDo = giay;
         ThoiGianReoGiay = (uint16_t)giay;
+        LuuCaiDatVaoFlash();
       }
     }
     else
@@ -1281,7 +1408,7 @@ void XuLyThoiGianReoFirebase()
 
 void XuLyDinhDangGioFirebase()
 {
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return;
   if (firebaseDaKhoiTao && Firebase.ready() && (millis() - TimeCheckDinhDangGio > CHU_KY_DINH_DANG_GIO_MS || TimeCheckDinhDangGio == 0))
   {
@@ -1294,6 +1421,7 @@ void XuLyDinhDangGioFirebase()
       {
         truocDo = (int8_t)la24Gio;
         DinhDang24Gio = la24Gio;
+        LuuCaiDatVaoFlash();
       }
     }
     else
@@ -1319,7 +1447,7 @@ void TaskKhoiTaoNgatCore(void *ThamSo)
 
 void XuLyChuongThuCongFirebase()
 {
-  if (apDangHoatDong)
+  if (apDangHoatDong || !choPhepKetNoiWifi)
     return;
   if (!firebaseDaKhoiTao || !Firebase.ready())
     return;
