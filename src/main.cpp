@@ -356,12 +356,6 @@ void TatWiFiHoanToan()
   SafePrintln("[WiFi] DANG NGAT KET NOI VA TAT WI-FI RADIO HOAN TOAN...");
   SafePrintln("========================================================");
 
-  // Thong bao trang thai len Firebase truoc khi tat Wi-Fi (neu dang ket noi)
-  if (firebaseDaKhoiTao && Firebase.ready())
-  {
-    Firebase.RTDB.setString(&Data, F("/DongHo/TrangThaiWiFi"), "DA_TAT");
-  }
-
   // Tat WebServer va SoftAP neu dang mo
   if (apDangHoatDong)
   {
@@ -871,7 +865,6 @@ void KichHoatCauHinhFirebase()
     Firebase.reconnectWiFi(true);
     firebaseDaKhoiTao = true;
     Serial.println("[Firebase] Da kich hoat cau hinh Firebase an toan!");
-    Firebase.RTDB.setString(&Data, F("/DongHo/TrangThaiWiFi"), "CHO_PHEP");
   }
 
   if (!taskDocBaoThucDaTao && choPhepKetNoiWifi)
